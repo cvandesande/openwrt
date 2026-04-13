@@ -9,6 +9,10 @@ PKG_RELEASE:=1
 
 include $(INCLUDE_DIR)/package.mk
 
+# Shell script package - no compilation needed
+define Build/Compile
+endef
+
 define Package/fancontrol
   SECTION:=utils
   CATEGORY:=Utilities
