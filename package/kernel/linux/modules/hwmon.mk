@@ -667,6 +667,21 @@ endef
 $(eval $(call KernelPackage,hwmon-tmp421))
 
 
+define KernelPackage/hwmon-tmp401
+  TITLE:=TI TMP401/TMP431 and compatible monitoring support
+  KCONFIG:=CONFIG_SENSORS_TMP401
+  FILES:=$(LINUX_DIR)/drivers/hwmon/tmp401.ko
+  AUTOLOAD:=$(call AutoLoad,60,tmp401)
+  $(call AddDepends/hwmon,+kmod-i2c-core)
+endef
+
+define KernelPackage/hwmon-tmp401/description
+  Kernel module for the Texas Instruments TMP401, TMP431 and compatible chips.
+endef
+
+$(eval $(call KernelPackage,hwmon-tmp401))
+
+
 define KernelPackage/hwmon-tps23861
   TITLE:=Texas Instruments TPS23861 PoE PSE
   KCONFIG:=CONFIG_SENSORS_TPS23861
