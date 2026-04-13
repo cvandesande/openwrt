@@ -14,13 +14,18 @@ DEF_MINPWM=50
 DEF_MAXPWM=255
 
 # Load configuration from UCI
+# Note: uci get works without sourcing /lib/functions.sh
 load_config() {
-    uci_load fancontrol fancontrol >/dev/null 2>&1 || return 0
-    INTERVAL=$(uci get fancontrol.@fancontrol[0].interval 2>/dev/null) || INTERVAL=$DEF_INTERVAL
-    MINTEMP=$(uci get fancontrol.@fancontrol[0].mintemp 2>/dev/null) || MINTEMP=$DEF_MINTEMP
-    MAXTEMP=$(uci get fancontrol.@fancontrol[0].maxtemp 2>/dev/null) || MAXTEMP=$DEF_MAXTEMP
-    MINPWM=$(uci get fancontrol.@fancontrol[0].minpwm 2>/dev/null) || MINPWM=$DEF_MINPWM
-    MAXPWM=$(uci get fancontrol.@fancontrol[0].maxpwm 2>/dev/null) || MAXPWM=$DEF_MAXPWM
+    INTERVAL=$(uci -q get fancontrol.@fancontrol[0].interval) || INTERVAL=$DEF_INTERVAL
+    [ -z "$INTERVAL" ] && INTERVAL=$DEF_INTERVAL
+    MINTEMP=$(uci -q get fancontrol.@fancontrol[0].mintemp) || MINTEMP=$DEF_MINTEMP
+    [ -z "$MINTEMP" ] && MINTEMP=$DEF_MINTEMP
+    MAXTEMP=$(uci -q get fancontrol.@fancontrol[0].maxtemp) || MAXTEMP=$DEF_MAXTEMP
+    [ -z "$MAXTEMP" ] && MAXTEMP=$DEF_MAXTEMP
+    MINPWM=$(uci -q get fancontrol.@fancontrol[0].minpwm) || MINPWM=$DEF_MINPWM
+    [ -z "$MINPWM" ] && MINPWM=$DEF_MINPWM
+    MAXPWM=$(uci -q get fancontrol.@fancontrol[0].maxpwm) || MAXPWM=$DEF_MAXPWM
+    [ -z "$MAXPWM" ] && MAXPWM=$DEF_MAXPWM
 }
 
 # Find hwmon device by name
@@ -113,10 +118,14 @@ set_pwm() {
 
 # Main loop
 main() {
-    local temp_hwmon fan_hwmon temp_raw temp pwm log_counter=0
+    local temp_hwmon fan_hwmon temp_raw temp pwm log_counter=0 log_interval=60
     
     # Load configuration
     load_config
+    
+    # Calculate log interval (log every ~60 seconds)
+    log_interval=$((60 / INTERVAL))
+    [ "$log_interval" -lt 1 ] && log_interval=1
     
     # Find devices
     temp_hwmon=$(find_temp_sensor)
@@ -134,7 +143,7 @@ main() {
     
     logger -t fancontrol "Started: temp=$temp_hwmon fan=$fan_hwmon"
     logger -t fancontrol "Range: ${MINTEMP}C-${MAXTEMP}C -> PWM ${MINPWM}-${MAXPWM}"
-    logger -t fancontrol "Interval: ${INTERVAL}s"
+    logger -t fancontrol "Interval: ${INTERVAL}s, log every ~60s"
     
     while true; do
         # Read temperature (in millidegrees)
@@ -155,9 +164,9 @@ main() {
         pwm=$(calc_pwm $temp)
         set_pwm "$fan_hwmon" $pwm
         
-        # Log every 60 seconds (every 6 iterations with 10s interval)
+        # Log every ~60 seconds based on configured interval
         log_counter=$((log_counter + 1))
-        if [ $((log_counter % 6)) -eq 0 ]; then
+        if [ $((log_counter % log_interval)) -eq 0 ]; then
             logger -t fancontrol "Temp: ${temp}C -> PWM: ${pwm}"
         fi
         
