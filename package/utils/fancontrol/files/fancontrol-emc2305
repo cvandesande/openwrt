@@ -6,11 +6,22 @@
 #
 # Copyright (C) 2025 Mono Technologies Inc.
 
-INTERVAL=10
-MINTEMP=45      # Start ramping at 45°C
-MAXTEMP=75      # Max speed at 75°C
-MINPWM=50       # Minimum PWM (fan starts spinning)
-MAXPWM=255      # Maximum PWM
+# Default values
+DEF_INTERVAL=10
+DEF_MINTEMP=45
+DEF_MAXTEMP=75
+DEF_MINPWM=50
+DEF_MAXPWM=255
+
+# Load configuration from UCI
+load_config() {
+    uci_load fancontrol fancontrol >/dev/null 2>&1 || return 0
+    INTERVAL=$(uci get fancontrol.@fancontrol[0].interval 2>/dev/null) || INTERVAL=$DEF_INTERVAL
+    MINTEMP=$(uci get fancontrol.@fancontrol[0].mintemp 2>/dev/null) || MINTEMP=$DEF_MINTEMP
+    MAXTEMP=$(uci get fancontrol.@fancontrol[0].maxtemp 2>/dev/null) || MAXTEMP=$DEF_MAXTEMP
+    MINPWM=$(uci get fancontrol.@fancontrol[0].minpwm 2>/dev/null) || MINPWM=$DEF_MINPWM
+    MAXPWM=$(uci get fancontrol.@fancontrol[0].maxpwm 2>/dev/null) || MAXPWM=$DEF_MAXPWM
+}
 
 # Find hwmon device by name
 find_hwmon_by_name() {
@@ -89,25 +100,23 @@ calc_pwm() {
     echo $pwm
 }
 
-# Set PWM value on fan controller
+# Set PWM value on fan controller (single fan)
 set_pwm() {
     local hwmon="$1"
     local pwm="$2"
     
-    # Try pwm1 first
+    # Single fan on pwm1
     if [ -f "$hwmon/pwm1" ]; then
         echo "$pwm" > "$hwmon/pwm1" 2>/dev/null
-    fi
-    
-    # Try pwm2 if exists
-    if [ -f "$hwmon/pwm2" ]; then
-        echo "$pwm" > "$hwmon/pwm2" 2>/dev/null
     fi
 }
 
 # Main loop
 main() {
-    local temp_hwmon fan_hwmon temp_raw temp pwm
+    local temp_hwmon fan_hwmon temp_raw temp pwm log_counter=0
+    
+    # Load configuration
+    load_config
     
     # Find devices
     temp_hwmon=$(find_temp_sensor)
@@ -124,16 +133,18 @@ main() {
     fi
     
     logger -t fancontrol "Started: temp=$temp_hwmon fan=$fan_hwmon"
-    logger -t fancontrol "Range: ${MINTEMP}°C-${MAXTEMP}°C -> PWM ${MINPWM}-${MAXPWM}"
+    logger -t fancontrol "Range: ${MINTEMP}C-${MAXTEMP}C -> PWM ${MINPWM}-${MAXPWM}"
+    logger -t fancontrol "Interval: ${INTERVAL}s"
     
     while true; do
         # Read temperature (in millidegrees)
         temp_raw=$(get_temperature "$temp_hwmon")
         
         if [ -z "$temp_raw" ]; then
-            logger -t fancontrol "WARNING: Could not read temperature, setting fans to max"
+            logger -t fancontrol "WARNING: Could not read temperature, setting fan to max"
             set_pwm "$fan_hwmon" $MAXPWM
             sleep $INTERVAL
+            log_counter=$((log_counter + 1))
             continue
         fi
         
@@ -144,9 +155,10 @@ main() {
         pwm=$(calc_pwm $temp)
         set_pwm "$fan_hwmon" $pwm
         
-        # Log every 60 seconds
-        if [ $((INTERVAL % 60)) -eq 0 ]; then
-            logger -t fancontrol "Temp: ${temp}°C -> PWM: ${pwm}"
+        # Log every 60 seconds (every 6 iterations with 10s interval)
+        log_counter=$((log_counter + 1))
+        if [ $((log_counter % 6)) -eq 0 ]; then
+            logger -t fancontrol "Temp: ${temp}C -> PWM: ${pwm}"
         fi
         
         sleep $INTERVAL
