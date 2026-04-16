@@ -84,7 +84,7 @@ endef
 define Build/mono-mkfs-ext4
 	$(TOPDIR)/target/linux/layerscape/image/gen_ext4_resizable.sh \
 		$@ $(ROOTFS_PARTSIZE) $(CONFIG_TARGET_EXT4_BLOCKSIZE) \
-		$(TARGET_DIR) \
+		$(mkfs_cur_target_dir) \
 		$(if $(CONFIG_TARGET_EXT4_RESERVED_PCT),$(CONFIG_TARGET_EXT4_RESERVED_PCT),0)
 endef
 
