@@ -1,0 +1,63 @@
+#!/bin/sh
+
+DISK=/dev/mmcblk0
+PART=${DISK}p1
+
+if ! grep -q "mono,gateway-dk" /sys/firmware/devicetree/base/compatible 2>/dev/null; then
+	exit 0
+fi
+
+command -v sfdisk >/dev/null || {
+	logger -t resize_rootfs "sfdisk not found, skipping resize"
+	exit 1
+}
+
+command -v resize2fs >/dev/null || {
+	logger -t resize_rootfs "resize2fs not found, skipping resize"
+	exit 1
+}
+
+PART_END=$(sfdisk -l "$DISK" 2>/dev/null | awk -v part="$PART" '$1 == part { print $3 }')
+DISK_END=$(sfdisk -l "$DISK" 2>/dev/null | awk -v disk="$DISK:" '$1 == "Disk" && $2 == disk { gsub(/,/, "", $7); print $7 }')
+
+if [ -z "$PART_END" ] || [ -z "$DISK_END" ]; then
+	logger -t resize_rootfs "Could not determine disk layout"
+	exit 1
+fi
+
+REMAINING=$(( (DISK_END - PART_END) * 512 / 1024 / 1024 ))
+
+if [ "$REMAINING" -gt 100 ]; then
+	logger -t resize_rootfs "Expanding partition (${REMAINING}MB available)"
+	echo ', +' | sfdisk -N 1 "$DISK" --no-reread 2>/dev/null || {
+		logger -t resize_rootfs "Partition expansion failed"
+		exit 1
+	}
+
+	partprobe "$DISK" 2>/dev/null || partx -u "$DISK" 2>/dev/null || true
+
+	if resize2fs "$PART" 2>/dev/null; then
+		logger -t resize_rootfs "Partition expanded and filesystem resized"
+		exit 0
+	fi
+
+	logger -t resize_rootfs "Partition expanded, reboot required for filesystem resize"
+	exit 1
+fi
+
+logger -t resize_rootfs "Partition at max, attempting filesystem resize"
+resize_output="$(resize2fs "$PART" 2>&1)"
+resize_rc=$?
+
+if [ "$resize_rc" -eq 0 ]; then
+	if printf '%s\n' "$resize_output" | grep -q "is already"; then
+		logger -t resize_rootfs "Filesystem already at maximum size"
+	else
+		logger -t resize_rootfs "Filesystem expanded successfully"
+	fi
+else
+	logger -t resize_rootfs "Filesystem resize failed"
+	exit 1
+fi
+
+exit 0
