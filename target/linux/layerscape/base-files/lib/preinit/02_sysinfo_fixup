@@ -1,11 +1,16 @@
 do_sysinfo_layerscape_fixup() {
 	[ -e /tmp/sysinfo/board_name ] || return
 	[ -e /proc/cmdline ] || return
+	board="$(strings /tmp/sysinfo/board_name)"
 	cmdline=$(strings /proc/cmdline)
 	case "${cmdline}" in
 		*root=/dev/mmcblk*)
-			board="$(strings /tmp/sysinfo/board_name)-sdboot"
-			echo ${board} > /tmp/sysinfo/board_name
+			case "${board}" in
+				mono,gateway-dk)
+					return
+					;;
+			esac
+			echo "${board}-sdboot" > /tmp/sysinfo/board_name
 		;;
 	esac
 }
