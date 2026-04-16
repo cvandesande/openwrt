@@ -97,7 +97,8 @@ platform_copy_config() {
 	fsl,lx2160a-rdb-sdboot)
 		platform_copy_config_sdboot
 		;;
-	mono,gateway-dk)
+	mono,gateway-dk | \
+	mono,gateway-dk-sdboot)
 		platform_copy_config_emmc
 		;;
 	esac
@@ -129,7 +130,8 @@ platform_check_image() {
 	fsl,ls2088a-rdb | \
 	fsl,lx2160a-rdb | \
 	fsl,lx2160a-rdb-sdboot | \
-	mono,gateway-dk)
+	mono,gateway-dk | \
+	mono,gateway-dk-sdboot)
 		return 0
 		;;
 	*)
@@ -175,7 +177,8 @@ platform_do_upgrade() {
 		platform_do_upgrade_sdboot "$1"
 		return 0
 		;;
-	mono,gateway-dk)
+	mono,gateway-dk | \
+	mono,gateway-dk-sdboot)
 		platform_do_upgrade_emmc "$1"
 		return 0
 		;;
