@@ -399,7 +399,9 @@ define Device/mono_gateway-dk
     kmod-leds-gpio \
     kmod-hwmon-emc2305 \
     fancontrol \
-    layerscape-fman
+    layerscape-fman \
+    resize2fs \
+    sfdisk
 endef
 TARGET_DEVICES += mono_gateway-dk
 
