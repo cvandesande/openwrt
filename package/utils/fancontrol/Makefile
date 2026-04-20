@@ -32,10 +32,10 @@ define Package/fancontrol/install
 	$(INSTALL_BIN) ./files/fancontrol-emc2305 $(1)/usr/sbin/
 	
 	$(INSTALL_DIR) $(1)/etc/init.d
-	$(INSTALL_BIN) ./files/fancontrol.init $(1)/etc/init.d/
+	$(INSTALL_BIN) ./files/fancontrol.init $(1)/etc/init.d/fancontrol
 	
 	$(INSTALL_DIR) $(1)/etc/config
-	$(INSTALL_CONF) ./files/fancontrol.config $(1)/etc/config/
+	$(INSTALL_CONF) ./files/fancontrol.config $(1)/etc/config/fancontrol
 endef
 
 $(eval $(call BuildPackage,fancontrol))
