@@ -1,0 +1,812 @@
+From: OpenAI Codex <codex@openai.com>
+Subject: [PATCH] net: ethernet: freescale: dpaa: add Goal 1 flowtable base
+
+Add the first Goal 1 DPAA flowtable patch with these constraints:
+
+- bind to the stock `TC_SETUP_FT` flowtable hook
+- compile accepted stock flowtable rules into driver-owned records
+- reject unsupported shapes explicitly with per-reason counters
+- expose delayed stats and install/reject visibility
+- leave the RX/TX datapath untouched
+
+This intentionally does not add any skb surgery, reinjection path, or
+FMAN-resident execution. It establishes the install-time contract and
+driver-owned state needed for later Goal 1 execution work.
+
+---
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -6,8 +6,11 @@
+ #ifndef __DPAA_H
+ #define __DPAA_H
+ 
++#include <linux/hashtable.h>
++#include <linux/mutex.h>
+ #include <linux/netdevice.h>
+ #include <linux/refcount.h>
++#include <net/flow_offload.h>
+ #include <net/xdp.h>
+ #include <soc/fsl/qman.h>
+ #include <soc/fsl/bman.h>
+@@ -18,6 +21,7 @@
+ 
+ /* Number of prioritised traffic classes */
+ #define DPAA_TC_NUM		4
++#define DPAA_FT_FLOW_HASH_BITS	8
+ 
+ /* More detailed FQ types - used for fine-grained WQ assignments */
+ enum dpaa_fq_type {
+@@ -127,6 +131,88 @@
+ 	struct xdp_frame *xdpf;
+ };
+ 
++enum dpaa_ft_nat_type {
++	DPAA_FT_NAT_NONE = 0,
++	DPAA_FT_NAT_SNAT,
++	DPAA_FT_NAT_DNAT,
++};
++
++enum dpaa_ft_reject_reason {
++	DPAA_FT_REJECT_UNSPEC = 0,
++	DPAA_FT_REJECT_MISSING_META,
++	DPAA_FT_REJECT_MISSING_MATCH,
++	DPAA_FT_REJECT_UNSUPPORTED_FAMILY,
++	DPAA_FT_REJECT_UNSUPPORTED_L4PROTO,
++	DPAA_FT_REJECT_UNSUPPORTED_TCP_FLAGS,
++	DPAA_FT_REJECT_UNSUPPORTED_ENCAP_MATCH,
++	DPAA_FT_REJECT_UNSUPPORTED_ENCAP_ACTION,
++	DPAA_FT_REJECT_UNSUPPORTED_ACTION,
++	DPAA_FT_REJECT_UNSUPPORTED_NAT,
++	DPAA_FT_REJECT_UNSUPPORTED_CSUM,
++	DPAA_FT_REJECT_MISSING_REDIRECT,
++	DPAA_FT_REJECT_DUPLICATE_COOKIE,
++	DPAA_FT_REJECT_NO_MEMORY,
++	DPAA_FT_REJECT_MAX,
++};
++
++struct dpaa_ft_tuple {
++	int ingress_ifindex;
++	u16 n_proto;
++	u8 ip_proto;
++	bool is_ipv6;
++	union {
++		struct {
++			__be32 src;
++			__be32 dst;
++		} v4;
++		struct {
++			struct in6_addr src;
++			struct in6_addr dst;
++		} v6;
++	};
++	__be16 src_port;
++	__be16 dst_port;
++};
++
++struct dpaa_ft_l2 {
++	bool src_valid;
++	bool dst_valid;
++	u8 src_mask;
++	u8 dst_mask;
++	unsigned char src[ETH_ALEN];
++	unsigned char dst[ETH_ALEN];
++};
++
++struct dpaa_ft_nat {
++	enum dpaa_ft_nat_type type;
++	bool addr_valid;
++	bool port_valid;
++	__be32 addr;
++	__be16 port;
++	u32 csum_flags;
++};
++
++struct dpaa_ft_entry {
++	struct hlist_node node;
++	unsigned long cookie;
++	struct flow_stats stats;
++	struct dpaa_ft_tuple tuple;
++	struct dpaa_ft_l2 l2;
++	struct dpaa_ft_nat nat;
++	struct net_device *out_dev;
++	u32 out_ifindex;
++};
++
++struct dpaa_ft_state {
++	struct mutex lock;
++	DECLARE_HASHTABLE(flows, DPAA_FT_FLOW_HASH_BITS);
++	unsigned long active;
++	u64 installs;
++	u64 destroys;
++	u64 stats_queries;
++	u64 rejects[DPAA_FT_REJECT_MAX];
++};
++
+ struct dpaa_priv {
+ 	struct dpaa_percpu_priv __percpu *percpu_priv;
+ 	struct dpaa_bp *dpaa_bp;
+@@ -173,10 +259,12 @@
+ 	bool rx_tstamp; /* Rx timestamping enabled */
+ 
+ 	struct bpf_prog *xdp_prog;
++	struct dpaa_ft_state ft;
+ };
+ 
+ /* from dpaa_ethtool.c */
+ extern const struct ethtool_ops dpaa_ethtool_ops;
++extern const char * const dpaa_ft_reject_names[DPAA_FT_REJECT_MAX];
+ 
+ /* from dpaa_eth_sysfs.c */
+ void dpaa_eth_sysfs_remove(struct device *dev);
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -25,9 +25,12 @@
+ #include <linux/etherdevice.h>
+ #include <linux/if_ether.h>
+ #include <linux/highmem.h>
++#include <linux/jhash.h>
++#include <linux/netlink.h>
+ #include <linux/percpu.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/sort.h>
++#include <linux/tc_act/tc_csum.h>
+ #include <linux/bpf.h>
+ #include <linux/bpf_trace.h>
+ #include <soc/fsl/bman.h>
+@@ -51,6 +54,23 @@
+ module_param(tx_timeout, ushort, 0444);
+ MODULE_PARM_DESC(tx_timeout, "The Tx timeout in ms");
+ 
++const char * const dpaa_ft_reject_names[DPAA_FT_REJECT_MAX] = {
++	[DPAA_FT_REJECT_UNSPEC] = "unspec",
++	[DPAA_FT_REJECT_MISSING_META] = "missing_meta",
++	[DPAA_FT_REJECT_MISSING_MATCH] = "missing_match",
++	[DPAA_FT_REJECT_UNSUPPORTED_FAMILY] = "unsupported_family",
++	[DPAA_FT_REJECT_UNSUPPORTED_L4PROTO] = "unsupported_l4proto",
++	[DPAA_FT_REJECT_UNSUPPORTED_TCP_FLAGS] = "unsupported_tcp_flags",
++	[DPAA_FT_REJECT_UNSUPPORTED_ENCAP_MATCH] = "unsupported_encap_match",
++	[DPAA_FT_REJECT_UNSUPPORTED_ENCAP_ACTION] = "unsupported_encap_action",
++	[DPAA_FT_REJECT_UNSUPPORTED_ACTION] = "unsupported_action",
++	[DPAA_FT_REJECT_UNSUPPORTED_NAT] = "unsupported_nat",
++	[DPAA_FT_REJECT_UNSUPPORTED_CSUM] = "unsupported_csum",
++	[DPAA_FT_REJECT_MISSING_REDIRECT] = "missing_redirect",
++	[DPAA_FT_REJECT_DUPLICATE_COOKIE] = "duplicate_cookie",
++	[DPAA_FT_REJECT_NO_MEMORY] = "no_memory",
++};
++
+ #define FM_FD_STAT_RX_ERRORS						\
+ 	(FM_FD_ERR_DMA | FM_FD_ERR_PHYSICAL	| \
+ 	 FM_FD_ERR_SIZE | FM_FD_ERR_CLS_DISCARD | \
+@@ -367,6 +387,550 @@
+ 	}
+ }
+ 
++static LIST_HEAD(dpaa_ft_block_cb_list);
++
++static u16 dpaa_ft_tcp_flags_mask(void)
++{
++	return cpu_to_be16(be32_to_cpu(TCP_FLAG_RST | TCP_FLAG_FIN) >> 16);
++}
++
++static struct dpaa_ft_entry *dpaa_ft_lookup_locked(struct dpaa_priv *priv,
++						   unsigned long cookie)
++{
++	struct dpaa_ft_entry *entry;
++
++	hash_for_each_possible(priv->ft.flows, entry, node, cookie) {
++		if (entry->cookie == cookie)
++			return entry;
++	}
++
++	return NULL;
++}
++
++static int dpaa_ft_reject_locked(struct dpaa_priv *priv,
++				 struct flow_cls_offload *cls,
++				 enum dpaa_ft_reject_reason reason,
++				 int err, const char *msg)
++{
++	if (reason < DPAA_FT_REJECT_MAX)
++		priv->ft.rejects[reason]++;
++
++	if (msg)
++		NL_SET_ERR_MSG_FMT_MOD(cls->common.extack, "%s", msg);
++
++	return err;
++}
++
++static int dpaa_ft_mangle_eth(struct dpaa_ft_entry *entry,
++			      const struct flow_action_entry *act)
++{
++	if (act->mangle.offset == 0 &&
++	    act->mangle.mask == ~htonl(0xffffffff)) {
++		memcpy(entry->l2.dst, &act->mangle.val, 4);
++		entry->l2.dst_mask |= 0x0f;
++		entry->l2.dst_valid = entry->l2.dst_mask == 0x3f;
++		return 0;
++	}
++
++	if (act->mangle.offset == 4 &&
++	    act->mangle.mask == ~htonl(0x0000ffff)) {
++		memcpy(entry->l2.dst + 4, &act->mangle.val, 2);
++		entry->l2.dst_mask |= 0x30;
++		entry->l2.dst_valid = entry->l2.dst_mask == 0x3f;
++		return 0;
++	}
++
++	if (act->mangle.offset == 4 &&
++	    act->mangle.mask == ~htonl(0xffff0000)) {
++		memcpy(entry->l2.src, (u8 *)&act->mangle.val + 2, 2);
++		entry->l2.src_mask |= 0x03;
++		entry->l2.src_valid = entry->l2.src_mask == 0x3f;
++		return 0;
++	}
++
++	if (act->mangle.offset == 8 &&
++	    act->mangle.mask == ~htonl(0xffffffff)) {
++		memcpy(entry->l2.src + 2, &act->mangle.val, 4);
++		entry->l2.src_mask |= 0x3c;
++		entry->l2.src_valid = entry->l2.src_mask == 0x3f;
++		return 0;
++	}
++
++	return -EOPNOTSUPP;
++}
++
++static int dpaa_ft_mangle_ip4(struct dpaa_ft_entry *entry,
++			      const struct flow_action_entry *act)
++{
++	if (entry->tuple.is_ipv6 ||
++	    act->mangle.mask != ~htonl(0xffffffff))
++		return -EOPNOTSUPP;
++
++	switch (act->mangle.offset) {
++	case offsetof(struct iphdr, saddr):
++		if (entry->nat.type == DPAA_FT_NAT_DNAT)
++			return -EOPNOTSUPP;
++		entry->nat.type = DPAA_FT_NAT_SNAT;
++		entry->nat.addr = (__force __be32)act->mangle.val;
++		entry->nat.addr_valid = true;
++		return 0;
++	case offsetof(struct iphdr, daddr):
++		if (entry->nat.type == DPAA_FT_NAT_SNAT)
++			return -EOPNOTSUPP;
++		entry->nat.type = DPAA_FT_NAT_DNAT;
++		entry->nat.addr = (__force __be32)act->mangle.val;
++		entry->nat.addr_valid = true;
++		return 0;
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
++static int dpaa_ft_mangle_l4_port(struct dpaa_ft_entry *entry,
++				  const struct flow_action_entry *act)
++{
++	u32 val;
++
++	if (act->mangle.offset != 0)
++		return -EOPNOTSUPP;
++
++	val = ntohl(act->mangle.val);
++
++	switch (act->mangle.mask) {
++	case ~htonl(0xffff0000):
++		if (entry->nat.type == DPAA_FT_NAT_DNAT)
++			return -EOPNOTSUPP;
++		entry->nat.type = DPAA_FT_NAT_SNAT;
++		entry->nat.port = cpu_to_be16(val >> 16);
++		entry->nat.port_valid = true;
++		return 0;
++	case ~htonl(0xffff):
++		if (entry->nat.type == DPAA_FT_NAT_SNAT)
++			return -EOPNOTSUPP;
++		entry->nat.type = DPAA_FT_NAT_DNAT;
++		entry->nat.port = cpu_to_be16(val);
++		entry->nat.port_valid = true;
++		return 0;
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
++static u32 dpaa_ft_expected_csum_flags(const struct dpaa_ft_entry *entry)
++{
++	u32 flags = 0;
++
++	if (entry->nat.type == DPAA_FT_NAT_NONE || entry->tuple.is_ipv6)
++		return 0;
++
++	flags |= TCA_CSUM_UPDATE_FLAG_IPV4HDR;
++
++	switch (entry->tuple.ip_proto) {
++	case IPPROTO_TCP:
++		flags |= TCA_CSUM_UPDATE_FLAG_TCP;
++		break;
++	case IPPROTO_UDP:
++		flags |= TCA_CSUM_UPDATE_FLAG_UDP;
++		break;
++	default:
++		break;
++	}
++
++	return flags;
++}
++
++static int dpaa_ft_compile_match(struct dpaa_priv *priv,
++				 struct flow_cls_offload *cls,
++				 struct dpaa_ft_entry *entry)
++{
++	struct flow_rule *rule = flow_cls_offload_flow_rule(cls);
++
++	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_META))
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_MISSING_META,
++					     -EOPNOTSUPP,
++					     "Missing ingress metadata");
++
++	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_CONTROL) ||
++	    !flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC) ||
++	    !flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS))
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_MISSING_MATCH,
++					     -EOPNOTSUPP,
++					     "Missing stock flowtable match keys");
++
++	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_VLAN) ||
++	    flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_CVLAN) ||
++	    flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PPPOE) ||
++	    flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_CONTROL) ||
++	    flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_KEYID) ||
++	    flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_IPV4_ADDRS) ||
++	    flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_IPV6_ADDRS) ||
++	    flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_PORTS))
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_MATCH,
++					     -EOPNOTSUPP,
++					     "Goal 1 excludes VLAN/PPPoE/tunnel match keys");
++
++	{
++		struct flow_match_meta match;
++
++		flow_rule_match_meta(rule, &match);
++		entry->tuple.ingress_ifindex = match.key->ingress_ifindex;
++	}
++
++	{
++		struct flow_match_control match;
++
++		flow_rule_match_control(rule, &match);
++		if (flow_rule_has_control_flags(match.mask->flags,
++						cls->common.extack))
++			return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ACTION,
++					     -EOPNOTSUPP, NULL);
++
++		switch (match.key->addr_type) {
++		case FLOW_DISSECTOR_KEY_IPV4_ADDRS:
++			if (!flow_rule_match_key(rule,
++						 FLOW_DISSECTOR_KEY_IPV4_ADDRS))
++				return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_MISSING_MATCH,
++					     -EOPNOTSUPP,
++					     "Missing IPv4 addresses");
++			entry->tuple.is_ipv6 = false;
++			break;
++		case FLOW_DISSECTOR_KEY_IPV6_ADDRS:
++			if (!flow_rule_match_key(rule,
++						 FLOW_DISSECTOR_KEY_IPV6_ADDRS))
++				return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_MISSING_MATCH,
++					     -EOPNOTSUPP,
++					     "Missing IPv6 addresses");
++			entry->tuple.is_ipv6 = true;
++			break;
++		default:
++			return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_FAMILY,
++					     -EOPNOTSUPP,
++					     "Goal 1 only supports routed IPv4/IPv6");
++		}
++	}
++
++	{
++		struct flow_match_basic match;
++
++		flow_rule_match_basic(rule, &match);
++		entry->tuple.n_proto = ntohs(match.key->n_proto);
++		entry->tuple.ip_proto = match.key->ip_proto;
++
++		if (!entry->tuple.is_ipv6 &&
++		    match.key->n_proto != htons(ETH_P_IP))
++			return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_FAMILY,
++					     -EOPNOTSUPP,
++					     "Unexpected L3 protocol for IPv4 flow");
++		if (entry->tuple.is_ipv6 &&
++		    match.key->n_proto != htons(ETH_P_IPV6))
++			return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_FAMILY,
++					     -EOPNOTSUPP,
++					     "Unexpected L3 protocol for IPv6 flow");
++
++		if (match.key->ip_proto != IPPROTO_TCP &&
++		    match.key->ip_proto != IPPROTO_UDP)
++			return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_L4PROTO,
++					     -EOPNOTSUPP,
++					     "Goal 1 only supports TCP/UDP");
++	}
++
++	{
++		struct flow_match_ports match;
++
++		flow_rule_match_ports(rule, &match);
++		entry->tuple.src_port = match.key->src;
++		entry->tuple.dst_port = match.key->dst;
++	}
++
++	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_TCP)) {
++		struct flow_match_tcp match;
++
++		flow_rule_match_tcp(rule, &match);
++		if (match.key->flags != 0 ||
++		    match.mask->flags != dpaa_ft_tcp_flags_mask())
++			return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_TCP_FLAGS,
++					     -EOPNOTSUPP,
++					     "Unexpected TCP flag match");
++	}
++
++	if (entry->tuple.is_ipv6) {
++		struct flow_match_ipv6_addrs match;
++
++		flow_rule_match_ipv6_addrs(rule, &match);
++		entry->tuple.v6.src = match.key->src;
++		entry->tuple.v6.dst = match.key->dst;
++	} else {
++		struct flow_match_ipv4_addrs match;
++
++		flow_rule_match_ipv4_addrs(rule, &match);
++		entry->tuple.v4.src = match.key->src;
++		entry->tuple.v4.dst = match.key->dst;
++	}
++
++	return 0;
++}
++
++static int dpaa_ft_compile_actions(struct dpaa_priv *priv,
++				   struct flow_cls_offload *cls,
++				   struct dpaa_ft_entry *entry)
++{
++	struct flow_rule *rule = flow_cls_offload_flow_rule(cls);
++	bool have_redirect = false, have_csum = false;
++	const struct flow_action_entry *act;
++	int i, err;
++
++	flow_action_for_each(i, act, &rule->action) {
++		switch (act->id) {
++		case FLOW_ACTION_MANGLE:
++			switch (act->mangle.htype) {
++			case FLOW_ACT_MANGLE_HDR_TYPE_ETH:
++				err = dpaa_ft_mangle_eth(entry, act);
++				if (err)
++					return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ACTION,
++					     err,
++					     "Unsupported Ethernet rewrite");
++				break;
++			case FLOW_ACT_MANGLE_HDR_TYPE_IP4:
++				err = dpaa_ft_mangle_ip4(entry, act);
++				if (err)
++					return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_NAT,
++					     err,
++					     "Goal 1 only supports exact IPv4 NAT");
++				break;
++			case FLOW_ACT_MANGLE_HDR_TYPE_TCP:
++			case FLOW_ACT_MANGLE_HDR_TYPE_UDP:
++				err = dpaa_ft_mangle_l4_port(entry, act);
++				if (err)
++					return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_NAT,
++					     err,
++					     "Unsupported TCP/UDP port rewrite");
++				break;
++			default:
++				return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ACTION,
++					     -EOPNOTSUPP,
++					     "Unsupported action mangle type");
++			}
++			break;
++		case FLOW_ACTION_CSUM:
++			entry->nat.csum_flags = act->csum_flags;
++			have_csum = true;
++			break;
++		case FLOW_ACTION_REDIRECT:
++			if (have_redirect)
++				return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ACTION,
++					     -EOPNOTSUPP,
++					     "Multiple redirect actions are not supported");
++			entry->out_dev = act->dev;
++			entry->out_ifindex = act->dev->ifindex;
++			have_redirect = true;
++			break;
++		case FLOW_ACTION_VLAN_POP:
++		case FLOW_ACTION_VLAN_PUSH:
++		case FLOW_ACTION_PPPOE_PUSH:
++			return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_ACTION,
++					     -EOPNOTSUPP,
++					     "Goal 1 excludes VLAN/PPPoE execution");
++		default:
++			return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ACTION,
++					     -EOPNOTSUPP,
++					     "Unsupported flowtable action");
++		}
++	}
++
++	if (!have_redirect || !entry->out_dev)
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_MISSING_REDIRECT,
++					     -EOPNOTSUPP,
++					     "Missing egress redirect");
++
++	if (!entry->l2.src_valid || !entry->l2.dst_valid)
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_MISSING_MATCH,
++					     -EOPNOTSUPP,
++					     "Missing exact L2 rewrite");
++
++	if (entry->nat.type != DPAA_FT_NAT_NONE) {
++		u32 expected_csum;
++
++		if (entry->tuple.is_ipv6)
++			return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_NAT,
++					     -EOPNOTSUPP,
++					     "Goal 1 defers IPv6 NAT");
++
++		expected_csum = dpaa_ft_expected_csum_flags(entry);
++		if (!have_csum || entry->nat.csum_flags != expected_csum)
++			return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_CSUM,
++					     -EOPNOTSUPP,
++					     "Unexpected checksum action for NAT flow");
++	} else if (have_csum) {
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_CSUM,
++					     -EOPNOTSUPP,
++					     "Checksum action without NAT is not supported");
++	}
++
++	dev_hold(entry->out_dev);
++	entry->stats.used_hw_stats = FLOW_ACTION_HW_STATS_DELAYED;
++	entry->stats.used_hw_stats_valid = true;
++
++	return 0;
++}
++
++static int dpaa_ft_compile_flow(struct dpaa_priv *priv,
++				struct flow_cls_offload *cls,
++				struct dpaa_ft_entry *entry)
++{
++	int err;
++
++	err = dpaa_ft_compile_match(priv, cls, entry);
++	if (err)
++		return err;
++
++	return dpaa_ft_compile_actions(priv, cls, entry);
++}
++
++static void dpaa_ft_put_entry(struct dpaa_ft_entry *entry)
++{
++	if (entry->out_dev)
++		dev_put(entry->out_dev);
++	kfree(entry);
++}
++
++static void dpaa_ft_destroy_all(struct dpaa_priv *priv)
++{
++	struct dpaa_ft_entry *entry;
++	struct hlist_node *tmp;
++	int bkt;
++
++	mutex_lock(&priv->ft.lock);
++	hash_for_each_safe(priv->ft.flows, bkt, tmp, entry, node) {
++		hash_del(&entry->node);
++		dpaa_ft_put_entry(entry);
++	}
++	priv->ft.active = 0;
++	mutex_unlock(&priv->ft.lock);
++}
++
++static int dpaa_ft_replace(struct dpaa_priv *priv, struct flow_cls_offload *cls)
++{
++	struct dpaa_ft_entry *entry;
++	int err;
++
++	if (dpaa_ft_lookup_locked(priv, cls->cookie))
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_DUPLICATE_COOKIE,
++					     -EEXIST,
++					     "Flow cookie is already installed");
++
++	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
++	if (!entry)
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_NO_MEMORY,
++					     -ENOMEM,
++					     "Unable to allocate compiled flow");
++
++	entry->cookie = cls->cookie;
++
++	err = dpaa_ft_compile_flow(priv, cls, entry);
++	if (err) {
++		dpaa_ft_put_entry(entry);
++		return err;
++	}
++
++	hash_add(priv->ft.flows, &entry->node, entry->cookie);
++	priv->ft.installs++;
++	priv->ft.active++;
++
++	return 0;
++}
++
++static int dpaa_ft_destroy(struct dpaa_priv *priv, struct flow_cls_offload *cls)
++{
++	struct dpaa_ft_entry *entry;
++
++	entry = dpaa_ft_lookup_locked(priv, cls->cookie);
++	if (!entry)
++		return -ENOENT;
++
++	hash_del(&entry->node);
++	if (priv->ft.active)
++		priv->ft.active--;
++	priv->ft.destroys++;
++	dpaa_ft_put_entry(entry);
++
++	return 0;
++}
++
++static int dpaa_ft_stats(struct dpaa_priv *priv, struct flow_cls_offload *cls)
++{
++	struct dpaa_ft_entry *entry;
++
++	entry = dpaa_ft_lookup_locked(priv, cls->cookie);
++	if (!entry)
++		return -ENOENT;
++
++	cls->stats = entry->stats;
++	priv->ft.stats_queries++;
++
++	return 0;
++}
++
++static int dpaa_ft_offload_cmd(struct dpaa_priv *priv,
++			       struct flow_cls_offload *cls)
++{
++	int err;
++
++	mutex_lock(&priv->ft.lock);
++	switch (cls->command) {
++	case FLOW_CLS_REPLACE:
++		err = dpaa_ft_replace(priv, cls);
++		break;
++	case FLOW_CLS_DESTROY:
++		err = dpaa_ft_destroy(priv, cls);
++		break;
++	case FLOW_CLS_STATS:
++		err = dpaa_ft_stats(priv, cls);
++		break;
++	default:
++		err = -EOPNOTSUPP;
++		break;
++	}
++	mutex_unlock(&priv->ft.lock);
++
++	return err;
++}
++
++static int dpaa_setup_ft_cb(enum tc_setup_type type, void *type_data,
++			    void *cb_priv)
++{
++	struct dpaa_priv *priv = cb_priv;
++
++	if (type != TC_SETUP_CLSFLOWER)
++		return -EOPNOTSUPP;
++
++	return dpaa_ft_offload_cmd(priv, type_data);
++}
++
+ static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+ 			 void *type_data)
+ {
+@@ -376,8 +940,17 @@
+ 	u8 num_tc;
+ 	int i;
+ 
+-	if (type != TC_SETUP_QDISC_MQPRIO)
++	switch (type) {
++	case TC_SETUP_QDISC_MQPRIO:
++		break;
++	case TC_SETUP_FT:
++		return flow_block_cb_setup_simple(type_data,
++						  &dpaa_ft_block_cb_list,
++						  dpaa_setup_ft_cb,
++						  priv, priv, true);
++	default:
+ 		return -EOPNOTSUPP;
++	}
+ 
+ 	mqprio->hw = TC_MQPRIO_HW_OFFLOAD_TCS;
+ 	num_tc = mqprio->num_tc;
+@@ -3340,6 +3913,8 @@
+ 	priv->net_dev = net_dev;
+ 
+ 	priv->msg_enable = netif_msg_init(debug, DPAA_MSG_DEFAULT);
++	mutex_init(&priv->ft.lock);
++	hash_init(priv->ft.flows);
+ 
+ 	priv->egress_fqs = devm_kcalloc(dev, dpaa_max_num_txqs(),
+ 					sizeof(*priv->egress_fqs),
+@@ -3532,6 +4107,7 @@
+ 	priv = netdev_priv(net_dev);
+ 
+ 	dpaa_eth_sysfs_remove(dev);
++	dpaa_ft_destroy_all(priv);
+ 
+ 	dev_set_drvdata(dev, NULL);
+ 	unregister_netdev(net_dev);
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth_sysfs.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth_sysfs.c
+@@ -110,10 +110,43 @@
+ 	return bytes;
+ }
+ 
++static ssize_t dpaa_eth_show_ft_offload(struct device *dev,
++					struct device_attribute *attr,
++					char *buf)
++{
++	struct dpaa_priv *priv = netdev_priv(to_net_dev(dev));
++	ssize_t bytes = 0;
++	int i;
++
++	mutex_lock(&priv->ft.lock);
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes, "active %lu\n",
++			   priv->ft.active);
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes, "installs %llu\n",
++			   priv->ft.installs);
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes, "destroys %llu\n",
++			   priv->ft.destroys);
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes, "stats %llu\n",
++			   priv->ft.stats_queries);
++
++	for (i = 0; i < DPAA_FT_REJECT_MAX && bytes < PAGE_SIZE; i++) {
++		if (!priv->ft.rejects[i] || !dpaa_ft_reject_names[i])
++			continue;
++
++		bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++				   "reject.%s %llu\n",
++				   dpaa_ft_reject_names[i],
++				   priv->ft.rejects[i]);
++	}
++	mutex_unlock(&priv->ft.lock);
++
++	return bytes;
++}
++
+ static struct device_attribute dpaa_eth_attrs[] = {
+ 	__ATTR(device_addr, 0444, dpaa_eth_show_addr, NULL),
+ 	__ATTR(fqids, 0444, dpaa_eth_show_fqids, NULL),
+ 	__ATTR(bpids, 0444, dpaa_eth_show_bpids, NULL),
++	__ATTR(ft_offload, 0444, dpaa_eth_show_ft_offload, NULL),
+ };
+ 
+ void dpaa_eth_sysfs_init(struct device *dev)
