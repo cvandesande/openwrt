@@ -202,6 +202,15 @@
 			fan_controller: fan-controller@2e {
 				compatible = "microchip,emc2305";
 				reg = <0x2e>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#pwm-cells = <3>;
+
+				fan: fan@0 {
+					reg = <0>;
+					pwms = <&fan_controller 26000 1 1>;
+					#cooling-cells = <2>;
+				};
 			};
 		};
 	};
