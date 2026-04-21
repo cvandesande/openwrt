@@ -1,0 +1,592 @@
+From: OpenAI Codex <codex@openai.com>
+Subject: [PATCH] net: ethernet: freescale: dpaa: compile and execute exact outbound egress recipe
+
+Compile the supported Ethernet rewrite, redirect, NAT, VLAN push, and
+PPPoE push flowtable actions into an explicit egress recipe owned by
+each compiled DPAA flow entry, then teach the fresh-skb executor to
+consume that recipe for one exact shaped outbound path.
+
+This target-local patch is carried for OpenWrt Layerscape armv8_64b
+(aarch64 little-endian). The offset-4 Ethernet pedit mapping below was
+validated with passive on-wire capture on that target and should not be
+read as proof for big-endian DPAA targets.
+
+Keep the plain routed path unchanged. Continue rejecting broader shaped
+recipes so shared-lower bridge handling, wider topology support, and
+true FMAN-resident forwarding remain deferred.
+
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c	2026-04-21 16:35:31.555056915 +0100
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c	2026-04-21 16:35:31.553406809 +0100
+@@ -13,10 +13,12 @@
+ #include <linux/of_net.h>
+ #include <linux/io.h>
+ #include <linux/if_arp.h>
++#include <linux/if_pppox.h>
+ #include <linux/if_vlan.h>
+ #include <linux/icmp.h>
+ #include <linux/ip.h>
+ #include <linux/ipv6.h>
++#include <linux/ppp_defs.h>
+ #include <linux/platform_device.h>
+ #include <linux/udp.h>
+ #include <linux/tcp.h>
+@@ -514,29 +516,37 @@
+ {
+ 	if (act->mangle.offset == 0 &&
+ 	    act->mangle.mask == ~htonl(0xffffffff)) {
+-		memcpy(entry->l2.dst, &act->mangle.val, 4);
+-		entry->l2.dst_mask |= 0x0f;
++		memcpy(entry->egress.l2.dst, &act->mangle.val, 4);
++		entry->egress.l2.dst_mask |= 0x0f;
+ 		return 0;
+ 	}
+ 
++	/*
++	 * This Layerscape armv8_64b series is validated on aarch64
++	 * little-endian. At offset 4 the tc pedit word still straddles
++	 * dst[4:5] and src[0:1], and the capture-validated val lanes here
++	 * are:
++	 *   ~htonl(0x0000ffff) -> src[0:1]
++	 *   ~htonl(0xffff0000) -> dst[4:5]
++	 */
+ 	if (act->mangle.offset == 4 &&
+ 	    act->mangle.mask == ~htonl(0x0000ffff)) {
+-		memcpy(entry->l2.dst + 4, &act->mangle.val, 2);
+-		entry->l2.dst_mask |= 0x30;
++		memcpy(entry->egress.l2.src, (u8 *)&act->mangle.val + 2, 2);
++		entry->egress.l2.src_mask |= 0x03;
+ 		return 0;
+ 	}
+ 
+ 	if (act->mangle.offset == 4 &&
+ 	    act->mangle.mask == ~htonl(0xffff0000)) {
+-		memcpy(entry->l2.src, (u8 *)&act->mangle.val + 2, 2);
+-		entry->l2.src_mask |= 0x03;
++		memcpy(entry->egress.l2.dst + 4, &act->mangle.val, 2);
++		entry->egress.l2.dst_mask |= 0x30;
+ 		return 0;
+ 	}
+ 
+ 	if (act->mangle.offset == 8 &&
+ 	    act->mangle.mask == ~htonl(0xffffffff)) {
+-		memcpy(entry->l2.src + 2, &act->mangle.val, 4);
+-		entry->l2.src_mask |= 0x3c;
++		memcpy(entry->egress.l2.src + 2, &act->mangle.val, 4);
++		entry->egress.l2.src_mask |= 0x3c;
+ 		return 0;
+ 	}
+ 
+@@ -552,18 +554,18 @@
+ 
+ 	switch (act->mangle.offset) {
+ 	case offsetof(struct iphdr, saddr):
+-		if (entry->nat.type == DPAA_FT_NAT_DNAT)
++		if (entry->egress.nat.type == DPAA_FT_NAT_DNAT)
+ 			return -EOPNOTSUPP;
+-		entry->nat.type = DPAA_FT_NAT_SNAT;
+-		entry->nat.addr = (__force __be32)act->mangle.val;
+-		entry->nat.addr_valid = true;
++		entry->egress.nat.type = DPAA_FT_NAT_SNAT;
++		entry->egress.nat.addr = (__force __be32)act->mangle.val;
++		entry->egress.nat.addr_valid = true;
+ 		return 0;
+ 	case offsetof(struct iphdr, daddr):
+-		if (entry->nat.type == DPAA_FT_NAT_SNAT)
++		if (entry->egress.nat.type == DPAA_FT_NAT_SNAT)
+ 			return -EOPNOTSUPP;
+-		entry->nat.type = DPAA_FT_NAT_DNAT;
+-		entry->nat.addr = (__force __be32)act->mangle.val;
+-		entry->nat.addr_valid = true;
++		entry->egress.nat.type = DPAA_FT_NAT_DNAT;
++		entry->egress.nat.addr = (__force __be32)act->mangle.val;
++		entry->egress.nat.addr_valid = true;
+ 		return 0;
+ 	default:
+ 		return -EOPNOTSUPP;
+@@ -582,18 +584,18 @@
+ 
+ 	switch (act->mangle.mask) {
+ 	case ~htonl(0xffff0000):
+-		if (entry->nat.type == DPAA_FT_NAT_DNAT)
++		if (entry->egress.nat.type == DPAA_FT_NAT_DNAT)
+ 			return -EOPNOTSUPP;
+-		entry->nat.type = DPAA_FT_NAT_SNAT;
+-		entry->nat.port = cpu_to_be16(val >> 16);
+-		entry->nat.port_valid = true;
++		entry->egress.nat.type = DPAA_FT_NAT_SNAT;
++		entry->egress.nat.port = cpu_to_be16(val >> 16);
++		entry->egress.nat.port_valid = true;
+ 		return 0;
+ 	case ~htonl(0xffff):
+-		if (entry->nat.type == DPAA_FT_NAT_SNAT)
++		if (entry->egress.nat.type == DPAA_FT_NAT_SNAT)
+ 			return -EOPNOTSUPP;
+-		entry->nat.type = DPAA_FT_NAT_DNAT;
+-		entry->nat.port = cpu_to_be16(val);
+-		entry->nat.port_valid = true;
++		entry->egress.nat.type = DPAA_FT_NAT_DNAT;
++		entry->egress.nat.port = cpu_to_be16(val);
++		entry->egress.nat.port_valid = true;
+ 		return 0;
+ 	default:
+ 		return -EOPNOTSUPP;
+@@ -604,7 +606,7 @@
+ {
+ 	u32 flags = 0;
+ 
+-	if (entry->nat.type == DPAA_FT_NAT_NONE || entry->tuple.is_ipv6)
++	if (entry->egress.nat.type == DPAA_FT_NAT_NONE || entry->tuple.is_ipv6)
+ 		return 0;
+ 
+ 	flags |= TCA_CSUM_UPDATE_FLAG_IPV4HDR;
+@@ -623,6 +625,166 @@
+ 	return flags;
+ }
+ 
++static int dpaa_ft_set_out_dev(struct dpaa_ft_egress_recipe *egress,
++			       struct net_device *dev)
++{
++	if (WARN_ON_ONCE(!dev))
++		return -EINVAL;
++
++	/* Error unwind still releases this via dpaa_ft_put_entry(). */
++	dev_hold(dev);
++	egress->out_dev = dev;
++	egress->out_ifindex = dev->ifindex;
++
++	return 0;
++}
++
++static int dpaa_ft_compile_vlan_push(struct dpaa_ft_egress_recipe *egress,
++				     const struct flow_action_entry *act)
++{
++	if (egress->vlan_push.present)
++		return -EEXIST;
++
++	if (act->vlan.proto != htons(ETH_P_8021Q))
++		return -EOPNOTSUPP;
++
++	egress->vlan_push.present = true;
++	egress->vlan_push.vid = act->vlan.vid;
++	egress->vlan_push.proto = act->vlan.proto;
++	egress->vlan_push.prio = act->vlan.prio;
++
++	return 0;
++}
++
++static int dpaa_ft_compile_pppoe_push(struct dpaa_ft_egress_recipe *egress,
++				      const struct flow_action_entry *act)
++{
++	if (egress->pppoe_push.present)
++		return -EEXIST;
++
++	egress->pppoe_push.present = true;
++	egress->pppoe_push.sid = act->pppoe.sid;
++
++	return 0;
++}
++
++static bool dpaa_ft_egress_recipe_needs_encap(
++	const struct dpaa_ft_egress_recipe *egress)
++{
++	return egress->vlan_push.present || egress->pppoe_push.present;
++}
++
++static unsigned int
++dpaa_ft_egress_recipe_encap_len(const struct dpaa_ft_egress_recipe *egress)
++{
++	unsigned int len = 0;
++
++	if (egress->vlan_push.present)
++		len += VLAN_HLEN;
++	if (egress->pppoe_push.present)
++		len += PPPOE_SES_HLEN;
++
++	return len;
++}
++
++static bool dpaa_ft_egress_recipe_supports_outbound_encap(
++	const struct dpaa_ft_entry *entry)
++{
++	const struct dpaa_ft_egress_recipe *egress = &entry->egress;
++
++	if (!dpaa_ft_egress_recipe_needs_encap(egress))
++		return true;
++
++	if (entry->tuple.is_ipv6)
++		return false;
++
++	if (!egress->out_dev || egress->out_dev->type != ARPHRD_ETHER)
++		return false;
++
++	/* Keep the first shaped executor path exact and reviewable. */
++	if (!egress->vlan_push.present || !egress->pppoe_push.present)
++		return false;
++
++	if (egress->nat.type != DPAA_FT_NAT_SNAT || !egress->nat.addr_valid)
++		return false;
++
++	return egress->vlan_push.proto == htons(ETH_P_8021Q);
++}
++
++static __be16 dpaa_ft_egress_outer_proto(const struct dpaa_ft_entry *entry)
++{
++	if (entry->egress.vlan_push.present)
++		return entry->egress.vlan_push.proto;
++
++	if (entry->egress.pppoe_push.present)
++		return htons(ETH_P_PPP_SES);
++
++	return htons(entry->tuple.n_proto);
++}
++
++static __be16 dpaa_ft_egress_ppp_proto(const struct dpaa_ft_entry *entry)
++{
++	return htons(entry->tuple.is_ipv6 ? PPP_IPV6 : PPP_IP);
++}
++
++static void dpaa_ft_build_egress_encap(struct sk_buff *skb,
++				       const struct dpaa_ft_entry *entry,
++				       unsigned int *l4_off)
++{
++	unsigned int encap_len = dpaa_ft_egress_recipe_encap_len(&entry->egress);
++	unsigned int network_len;
++	u8 *encap;
++
++	if (!encap_len) {
++		skb_reset_mac_header(skb);
++		skb_set_network_header(skb, ETH_HLEN);
++		skb_set_transport_header(skb, *l4_off);
++		skb->mac_len = ETH_HLEN;
++		return;
++	}
++
++	skb_pull(skb, ETH_HLEN);
++	network_len = skb->len;
++
++	skb_push(skb, ETH_HLEN + encap_len);
++	skb_reset_mac_header(skb);
++	skb_set_network_header(skb, ETH_HLEN + encap_len);
++	skb_set_transport_header(skb, *l4_off + encap_len);
++	skb->mac_len = ETH_HLEN + encap_len;
++
++	encap = skb_mac_header(skb) + ETH_HLEN;
++
++	if (entry->egress.vlan_push.present) {
++		struct vlan_hdr *vhdr = (struct vlan_hdr *)encap;
++		u16 vlan_tci;
++
++		vlan_tci = entry->egress.vlan_push.vid & VLAN_VID_MASK;
++		vlan_tci |= (u16)(entry->egress.vlan_push.prio & 0x7) <<
++			    VLAN_PRIO_SHIFT;
++
++		vhdr->h_vlan_TCI = htons(vlan_tci);
++		vhdr->h_vlan_encapsulated_proto =
++			entry->egress.pppoe_push.present ?
++			htons(ETH_P_PPP_SES) :
++			htons(entry->tuple.n_proto);
++		encap += VLAN_HLEN;
++	}
++
++	if (entry->egress.pppoe_push.present) {
++		struct pppoe_hdr *phdr = (struct pppoe_hdr *)encap;
++		__be16 *ppp_proto = (__be16 *)(phdr + 1);
++
++		phdr->ver = 1;
++		phdr->type = 1;
++		phdr->code = 0;
++		phdr->sid = htons(entry->egress.pppoe_push.sid);
++		phdr->length = htons(network_len + sizeof(*ppp_proto));
++		*ppp_proto = dpaa_ft_egress_ppp_proto(entry);
++	}
++
++	*l4_off += encap_len;
++}
++
+ static int dpaa_ft_compile_match(struct dpaa_priv *priv,
+ 				 struct flow_cls_offload *cls,
+ 				 struct dpaa_ft_entry *entry)
+@@ -811,7 +971,7 @@
+ 			}
+ 			break;
+ 		case FLOW_ACTION_CSUM:
+-			entry->nat.csum_flags = act->csum_flags;
++			entry->egress.nat.csum_flags = act->csum_flags;
+ 			have_csum = true;
+ 			break;
+ 		case FLOW_ACTION_REDIRECT:
+@@ -820,17 +980,37 @@
+ 					     DPAA_FT_REJECT_UNSUPPORTED_ACTION,
+ 					     -EOPNOTSUPP,
+ 					     "Multiple redirect actions are not supported");
+-			entry->out_dev = act->dev;
+-			entry->out_ifindex = act->dev->ifindex;
++			err = dpaa_ft_set_out_dev(&entry->egress, act->dev);
++			if (err)
++				return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_MISSING_REDIRECT,
++					     err,
++					     "Redirect action is missing egress device");
+ 			have_redirect = true;
+ 			break;
+ 		case FLOW_ACTION_VLAN_POP:
+-		case FLOW_ACTION_VLAN_PUSH:
+-		case FLOW_ACTION_PPPOE_PUSH:
+ 			return dpaa_ft_reject_locked(priv, cls,
+ 					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_ACTION,
+ 					     -EOPNOTSUPP,
+-					     "VLAN and PPPoE actions are not supported");
++					     "Ingress VLAN pop is not supported");
++		case FLOW_ACTION_VLAN_PUSH:
++			err = dpaa_ft_compile_vlan_push(&entry->egress, act);
++			if (err)
++				return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_ACTION,
++					     err,
++					     err == -EEXIST ?
++					     "Only one VLAN push can be compiled" :
++					     "Only 802.1Q VLAN push can be compiled");
++			break;
++		case FLOW_ACTION_PPPOE_PUSH:
++			err = dpaa_ft_compile_pppoe_push(&entry->egress, act);
++			if (err)
++				return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_ACTION,
++					     err,
++					     "Only one PPPoE push can be compiled");
++			break;
+ 		default:
+ 			return dpaa_ft_reject_locked(priv, cls,
+ 					     DPAA_FT_REJECT_UNSUPPORTED_ACTION,
+@@ -839,19 +1019,20 @@
+ 		}
+ 	}
+ 
+-	if (!have_redirect || !entry->out_dev)
++	if (!have_redirect || !entry->egress.out_dev)
+ 		return dpaa_ft_reject_locked(priv, cls,
+ 					     DPAA_FT_REJECT_MISSING_REDIRECT,
+ 					     -EOPNOTSUPP,
+ 					     "Missing egress redirect");
+ 
+-	if (entry->l2.src_mask != 0x3f || entry->l2.dst_mask != 0x3f)
++	if (entry->egress.l2.src_mask != 0x3f ||
++	    entry->egress.l2.dst_mask != 0x3f)
+ 		return dpaa_ft_reject_locked(priv, cls,
+ 					     DPAA_FT_REJECT_MISSING_MATCH,
+ 					     -EOPNOTSUPP,
+ 					     "Missing exact L2 rewrite");
+ 
+-	if (entry->nat.type != DPAA_FT_NAT_NONE) {
++	if (entry->egress.nat.type != DPAA_FT_NAT_NONE) {
+ 		u32 expected_csum;
+ 
+ 		if (entry->tuple.is_ipv6)
+@@ -861,7 +1042,7 @@
+ 					     "IPv6 NAT is not supported");
+ 
+ 		expected_csum = dpaa_ft_expected_csum_flags(entry);
+-		if (!have_csum || entry->nat.csum_flags != expected_csum)
++		if (!have_csum || entry->egress.nat.csum_flags != expected_csum)
+ 			return dpaa_ft_reject_locked(priv, cls,
+ 					     DPAA_FT_REJECT_UNSUPPORTED_CSUM,
+ 					     -EOPNOTSUPP,
+@@ -873,7 +1054,16 @@
+ 					     "Checksum action without NAT is not supported");
+ 	}
+ 
+-	dev_hold(entry->out_dev);
++	/*
++	 * Compile the shaped egress recipe now so the next execution patch can
++	 * consume it without widening the plain flowtable compiler again.
++	 * Keep rejecting VLAN and PPPoE execution until that executor exists.
++	 */
++	if (!dpaa_ft_egress_recipe_supports_outbound_encap(entry))
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_ACTION,
++					     -EOPNOTSUPP,
++					     "Only exact IPv4 SNAT with one 802.1Q VLAN push and one PPPoE push is supported");
+ 	entry->stats.used_hw_stats = FLOW_ACTION_HW_STATS_DELAYED;
+ 	entry->stats.used_hw_stats_valid = true;
+ 
+@@ -895,8 +1085,8 @@
+ 
+ static void dpaa_ft_put_entry(struct dpaa_ft_entry *entry)
+ {
+-	if (entry->out_dev)
+-		dev_put(entry->out_dev);
++	if (entry->egress.out_dev)
++		dev_put(entry->egress.out_dev);
+ 	kfree(entry);
+ }
+ 
+@@ -1141,6 +1331,7 @@
+ 	struct dpaa_ft_tuple tuple;
+ 	struct dpaa_ft_entry *entry;
+ 	unsigned int l4_off;
++	unsigned int headroom;
+ 	struct sk_buff *fwd_skb;
+ 	struct ethhdr *eth;
+ 	u32 tuple_hash;
+@@ -1168,8 +1359,11 @@
+ 		return false;
+ 	}
+ 
+-	fwd_skb = skb_copy_expand(skb, LL_RESERVED_SPACE(entry->out_dev),
+-				  entry->out_dev->needed_tailroom,
++	headroom = LL_RESERVED_SPACE(entry->egress.out_dev) +
++		   dpaa_ft_egress_recipe_encap_len(&entry->egress);
++
++	fwd_skb = skb_copy_expand(skb, headroom,
++				  entry->egress.out_dev->needed_tailroom,
+ 				  GFP_ATOMIC);
+ 	if (!fwd_skb) {
+ 		dpaa_ft_count_fallback(priv, DPAA_FT_FALLBACK_NO_MEMORY);
+@@ -1178,20 +1372,19 @@
+ 	}
+ 
+ 	skb_scrub_packet(fwd_skb,
+-			 !net_eq(dev_net(entry->out_dev), dev_net(priv->net_dev)));
++			 !net_eq(dev_net(entry->egress.out_dev),
++				 dev_net(priv->net_dev)));
+ 	skb_orphan(fwd_skb);
+ 	skb_set_queue_mapping(fwd_skb, 0);
+-	skb_reset_mac_header(fwd_skb);
+-	skb_set_network_header(fwd_skb, ETH_HLEN);
+-	skb_set_transport_header(fwd_skb, l4_off);
+-	fwd_skb->mac_len = ETH_HLEN;
+-	fwd_skb->dev = entry->out_dev;
++	dpaa_ft_build_egress_encap(fwd_skb, entry, &l4_off);
++	fwd_skb->dev = entry->egress.out_dev;
+ 	fwd_skb->priority = 0;
+ 	fwd_skb->ip_summed = CHECKSUM_NONE;
+ 
+ 	eth = eth_hdr(fwd_skb);
+-	memcpy(eth->h_source, entry->l2.src, ETH_ALEN);
+-	memcpy(eth->h_dest, entry->l2.dst, ETH_ALEN);
++	memcpy(eth->h_source, entry->egress.l2.src, ETH_ALEN);
++	memcpy(eth->h_dest, entry->egress.l2.dst, ETH_ALEN);
++	eth->h_proto = dpaa_ft_egress_outer_proto(entry);
+ 
+ 	if (entry->tuple.is_ipv6) {
+ 		struct ipv6hdr *ip6h = ipv6_hdr(fwd_skb);
+@@ -1202,53 +1395,58 @@
+ 
+ 		ip_decrease_ttl(iph);
+ 
+-		if (entry->nat.addr_valid) {
++		if (entry->egress.nat.addr_valid) {
+ 			__be32 old_addr;
+ 
+-			if (entry->nat.type == DPAA_FT_NAT_SNAT) {
++			if (entry->egress.nat.type == DPAA_FT_NAT_SNAT) {
+ 				old_addr = iph->saddr;
+-				iph->saddr = entry->nat.addr;
++				iph->saddr = entry->egress.nat.addr;
+ 			} else {
+ 				old_addr = iph->daddr;
+-				iph->daddr = entry->nat.addr;
++				iph->daddr = entry->egress.nat.addr;
+ 			}
+ 
+-			csum_replace4(&iph->check, old_addr, entry->nat.addr);
++			csum_replace4(&iph->check, old_addr,
++				      entry->egress.nat.addr);
+ 			dpaa_ft_maybe_update_l4_addr(fwd_skb, entry, old_addr,
+-						     entry->nat.addr, l4_off);
++						     entry->egress.nat.addr,
++						     l4_off);
+ 		}
+ 
+-		if (entry->nat.port_valid) {
++		if (entry->egress.nat.port_valid) {
+ 			__be16 old_port;
+ 
+ 			if (entry->tuple.ip_proto == IPPROTO_TCP) {
+ 				struct tcphdr *tcph = tcp_hdr(fwd_skb);
+ 
+-				if (entry->nat.type == DPAA_FT_NAT_SNAT) {
++				if (entry->egress.nat.type ==
++				    DPAA_FT_NAT_SNAT) {
+ 					old_port = tcph->source;
+-					tcph->source = entry->nat.port;
++					tcph->source = entry->egress.nat.port;
+ 				} else {
+ 					old_port = tcph->dest;
+-					tcph->dest = entry->nat.port;
++					tcph->dest = entry->egress.nat.port;
+ 				}
+ 			} else {
+ 				struct udphdr *udph = udp_hdr(fwd_skb);
+ 
+-				if (entry->nat.type == DPAA_FT_NAT_SNAT) {
++				if (entry->egress.nat.type ==
++				    DPAA_FT_NAT_SNAT) {
+ 					old_port = udph->source;
+-					udph->source = entry->nat.port;
++					udph->source = entry->egress.nat.port;
+ 				} else {
+ 					old_port = udph->dest;
+-					udph->dest = entry->nat.port;
++					udph->dest = entry->egress.nat.port;
+ 				}
+ 			}
+ 
+ 			dpaa_ft_maybe_update_l4_port(fwd_skb, entry, old_port,
+-						     entry->nat.port, l4_off);
++						     entry->egress.nat.port,
++						     l4_off);
+ 		}
+ 	}
+ 
+-	fwd_skb->protocol = htons(entry->tuple.n_proto);
++	fwd_skb->protocol = dpaa_ft_egress_outer_proto(entry);
+ 
+ 	err = dev_queue_xmit(fwd_skb);
+ 	if (unlikely(net_xmit_eval(err))) {
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h	2026-04-21 16:35:31.554858081 +0100
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h	2026-04-21 16:35:31.553458567 +0100
+@@ -200,6 +200,28 @@
+ 	u32 csum_flags;
+ };
+ 
++struct dpaa_ft_vlan_push {
++	bool present;
++	u16 vid;
++	__be16 proto;
++	u8 prio;
++};
++
++struct dpaa_ft_pppoe_push {
++	bool present;
++	u16 sid;
++};
++
++struct dpaa_ft_egress_recipe {
++	struct dpaa_ft_l2 l2;
++	struct dpaa_ft_nat nat;
++	struct net_device *out_dev;
++	/* Retain the ifindex for reporting and later hardware programming. */
++	u32 out_ifindex;
++	struct dpaa_ft_vlan_push vlan_push;
++	struct dpaa_ft_pppoe_push pppoe_push;
++};
++
+ struct dpaa_ft_entry {
+ 	struct hlist_node node;
+ 	struct hlist_node tuple_node;
+@@ -211,10 +233,7 @@
+ 	atomic64_t bytes;
+ 	atomic64_t lastused;
+ 	struct dpaa_ft_tuple tuple;
+-	struct dpaa_ft_l2 l2;
+-	struct dpaa_ft_nat nat;
+-	struct net_device *out_dev;
+-	u32 out_ifindex;
++	struct dpaa_ft_egress_recipe egress;
+ };
+ 
+ struct dpaa_ft_state {
