@@ -1,0 +1,747 @@
+From: OpenAI Codex <codex@openai.com>
+Subject: [PATCH] net: ethernet: freescale: dpaa: add Stage 1 FMAN backend ownership
+
+Add the Stage 1 FMAN backend ownership boundary without enabling live
+FMAN steering:
+
+- build explicit backend-owned install-plan state keyed by private FMAN
+  binding metadata, including backend-local port binding identity
+- reserve and unwind RX KeyGen scheme ownership to prove resource
+  ordering and teardown without binding live steering state
+- track backend lifecycle transitions and resource counters through
+  ft_offload
+- keep hardware-requested mode in the backend path with explicit
+  degradation and unchanged packet forwarding
+
+Keep software flow offloading on the current DPAA executor path.
+Keep hardware flow offloading honest: no live FMAN forwarding yet, but
+real backend plan and resource ownership now exists and unwinds
+explicitly.
+
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+index e99cf06..05b7c86 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+@@ -201,6 +201,17 @@ enum dpaa_ft_hw_degrade_reason {
+ 	DPAA_FT_HW_DEGRADE_MAX,
+ };
+ 
++enum dpaa_ft_hw_lifecycle_state {
++	DPAA_FT_HW_LIFECYCLE_NONE = 0,
++	DPAA_FT_HW_LIFECYCLE_PLAN_BUILT,
++	DPAA_FT_HW_LIFECYCLE_RESOURCES_ALLOCATED,
++	DPAA_FT_HW_LIFECYCLE_INSTALL_PENDING,
++	DPAA_FT_HW_LIFECYCLE_INSTALL_FAILED,
++	DPAA_FT_HW_LIFECYCLE_TEARDOWN_PENDING,
++	DPAA_FT_HW_LIFECYCLE_TEARDOWN_COMPLETE,
++	DPAA_FT_HW_LIFECYCLE_MAX,
++};
++
+ enum dpaa_ft_fallback_reason {
+ 	DPAA_FT_FALLBACK_PACKET = 0,
+ 	DPAA_FT_FALLBACK_NO_MEMORY,
+@@ -278,23 +289,48 @@ struct dpaa_ft_egress_recipe {
+ 	struct dpaa_ft_pppoe_push pppoe_push;
+ };
+ 
++struct dpaa_ft_hw_binding {
++	u8 rx_port_id;
++	u8 tx_port_id;
++	u32 rx_pcd_base_fqid;
++	u32 rx_pcd_fq_count;
++};
++
++struct dpaa_ft_hw_install_plan {
++	bool valid;
++	unsigned long cookie;
++	u32 generation;
++	struct dpaa_ft_hw_binding binding;
++};
++
+ struct dpaa_ft_hw_resources {
+ 	struct fman_port *rx_port;
+ 	struct fman_port *tx_port;
+ 	bool rx_bound;
+ 	bool tx_bound;
+ 	bool keygen_api_available;
+-	bool dry_run_scheme_allocated;
+-	u8 dry_run_scheme_id;
++	bool keygen_reserved;
++	u8 keygen_scheme_id;
++	u32 generation;
++	struct dpaa_ft_hw_binding binding;
+ };
+ 
+ struct dpaa_ft_hw_backend {
+ 	enum dpaa_ft_hw_backend_state state;
+ 	enum dpaa_ft_hw_dry_run_result last_dry_run;
+ 	enum dpaa_ft_hw_degrade_reason last_degrade;
++	enum dpaa_ft_hw_lifecycle_state last_lifecycle;
++	u32 generation;
+ 	u64 dry_run_attempts;
+ 	u64 dry_run_lowerable;
+ 	u64 dry_run_not_lowerable;
++	u64 plan_builds;
++	u64 plan_failures;
++	u64 resource_allocations;
++	u64 resource_allocation_failures;
++	u64 resource_releases;
++	u64 resource_release_failures;
++	u64 teardown_completes;
+ 	u64 install_attempts;
+ 	u64 install_failures;
+ 	u64 remove_attempts;
+@@ -302,12 +338,14 @@ struct dpaa_ft_hw_backend {
+ 	u64 stats_queries;
+ 	int last_error;
+ 	u64 degrade_events[DPAA_FT_HW_DEGRADE_MAX];
++	struct dpaa_ft_hw_install_plan plan;
+ 	struct dpaa_ft_hw_resources res;
+ };
+ 
+ struct dpaa_ft_hw_flow {
+-	enum dpaa_ft_hw_backend_state state;
++	enum dpaa_ft_hw_lifecycle_state state;
+ 	int last_error;
++	u32 generation;
+ };
+ 
+ struct dpaa_ft_entry {
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+index f86727d..92f5082 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+@@ -1653,6 +1653,7 @@ static void dpaa_ft_bind_fman_ports(struct dpaa_priv *priv)
+ 
+ struct dpaa_ft_hw_result {
+ 	enum dpaa_ft_hw_backend_state state;
++	enum dpaa_ft_hw_lifecycle_state lifecycle;
+ 	enum dpaa_ft_hw_dry_run_result dry_run;
+ 	enum dpaa_ft_hw_degrade_reason degrade;
+ 	enum dpaa_ft_reject_reason reject_reason;
+@@ -1687,18 +1688,47 @@ static const char *dpaa_ft_fman_hw_disabled_reason(const struct dpaa_priv *priv)
+ 	return "hardware flow offloading requested, but the FMAN backend is disabled because backend prerequisites are incomplete; flows stay on the normal Linux path";
+ }
+ 
++static void dpaa_ft_hw_clear_plan(struct dpaa_ft_hw_backend *hw)
++{
++	memset(&hw->plan, 0, sizeof(hw->plan));
++}
++
++static void dpaa_ft_hw_clear_resources(struct dpaa_ft_hw_backend *hw)
++{
++	memset(&hw->res, 0, sizeof(hw->res));
++}
++
++static void
++dpaa_ft_hw_set_lifecycle(struct dpaa_ft_hw_backend *hw,
++			 enum dpaa_ft_hw_lifecycle_state state)
++{
++	if (state <= DPAA_FT_HW_LIFECYCLE_NONE ||
++	    state >= DPAA_FT_HW_LIFECYCLE_MAX)
++		return;
++
++	hw->last_lifecycle = state;
++}
++
++static void dpaa_ft_fman_hw_reset_owned_state(struct dpaa_priv *priv)
++{
++	struct dpaa_ft_hw_backend *hw = &priv->ft.hw;
++
++	if (hw->res.keygen_reserved && hw->res.rx_port)
++		fman_port_release_kg_scheme(hw->res.rx_port,
++					    hw->res.keygen_scheme_id);
++
++	dpaa_ft_hw_clear_plan(hw);
++	dpaa_ft_hw_clear_resources(hw);
++}
++
+ static void dpaa_ft_hw_reset_observation(struct dpaa_ft_hw_backend *hw)
+ {
+ 	hw->last_dry_run = DPAA_FT_HW_DRY_RUN_NONE;
+ 	hw->last_degrade = DPAA_FT_HW_DEGRADE_NONE;
++	hw->last_lifecycle = DPAA_FT_HW_LIFECYCLE_NONE;
+ 	hw->last_error = 0;
+-	hw->res.rx_port = NULL;
+-	hw->res.tx_port = NULL;
+-	hw->res.rx_bound = false;
+-	hw->res.tx_bound = false;
+-	hw->res.keygen_api_available = false;
+-	hw->res.dry_run_scheme_allocated = false;
+-	hw->res.dry_run_scheme_id = 0;
++	dpaa_ft_hw_clear_plan(hw);
++	dpaa_ft_hw_clear_resources(hw);
+ }
+ 
+ static void dpaa_ft_hw_note_degrade(struct dpaa_priv *priv,
+@@ -1725,6 +1755,7 @@ static void dpaa_ft_fman_hw_prepare(struct dpaa_priv *priv)
+ {
+ 	struct dpaa_ft_hw_backend *hw = &priv->ft.hw;
+ 
++	dpaa_ft_fman_hw_reset_owned_state(priv);
+ 	dpaa_ft_hw_reset_observation(hw);
+ 	hw->state = DPAA_FT_HW_BACKEND_NOT_IMPLEMENTED;
+ 
+@@ -1749,6 +1780,152 @@ static void dpaa_ft_fman_hw_prepare(struct dpaa_priv *priv)
+ 	hw->state = DPAA_FT_HW_BACKEND_READY;
+ }
+ 
++static int dpaa_ft_fman_hw_build_plan(struct dpaa_priv *priv,
++				      const struct dpaa_ft_entry *entry,
++				      struct dpaa_ft_hw_result *result)
++{
++	struct dpaa_ft_hw_backend *hw = &priv->ft.hw;
++
++	if (!priv->fman.rx_pcd_fq_count) {
++		hw->plan_failures++;
++		hw->install_failures++;
++		hw->last_error = -EOPNOTSUPP;
++		dpaa_ft_hw_set_lifecycle(hw, DPAA_FT_HW_LIFECYCLE_INSTALL_FAILED);
++		result->lifecycle = hw->last_lifecycle;
++		result->degrade = DPAA_FT_HW_DEGRADE_INSTALL_FAILED;
++		result->reject_reason = DPAA_FT_REJECT_HW_INSTALL_FAILED;
++		result->err = -EOPNOTSUPP;
++		result->message = "hardware flow offloading requested, but the FMAN backend could not derive a stable local port binding for the staged install plan; flows stay on the normal Linux path";
++		return result->err;
++	}
++
++	dpaa_ft_hw_clear_plan(hw);
++	hw->generation++;
++	hw->plan.valid = true;
++	hw->plan.cookie = entry->cookie;
++	hw->plan.generation = hw->generation;
++	hw->plan.binding.rx_port_id = priv->fman.rx.port_id;
++	hw->plan.binding.tx_port_id = priv->fman.tx.port_id;
++	hw->plan.binding.rx_pcd_base_fqid = priv->fman.rx_pcd_base_fqid;
++	hw->plan.binding.rx_pcd_fq_count = priv->fman.rx_pcd_fq_count;
++	hw->plan_builds++;
++	dpaa_ft_hw_set_lifecycle(hw, DPAA_FT_HW_LIFECYCLE_PLAN_BUILT);
++	result->lifecycle = hw->last_lifecycle;
++
++	return 0;
++}
++
++static int dpaa_ft_fman_hw_alloc_resources(struct dpaa_priv *priv,
++					   struct dpaa_ft_hw_result *result)
++{
++	struct dpaa_ft_hw_backend *hw = &priv->ft.hw;
++	u8 scheme_id;
++	int err;
++
++	if (!hw->plan.valid) {
++		hw->resource_allocation_failures++;
++		hw->install_failures++;
++		hw->last_error = -EINVAL;
++		dpaa_ft_hw_set_lifecycle(hw, DPAA_FT_HW_LIFECYCLE_INSTALL_FAILED);
++		result->lifecycle = hw->last_lifecycle;
++		result->degrade = DPAA_FT_HW_DEGRADE_INSTALL_FAILED;
++		result->reject_reason = DPAA_FT_REJECT_HW_INSTALL_FAILED;
++		result->err = -EINVAL;
++		result->message = "hardware flow offloading requested, but the FMAN backend has no staged install plan to own resources for; flows stay on the normal Linux path";
++		return result->err;
++	}
++
++	dpaa_ft_hw_clear_resources(hw);
++	hw->res.rx_port = priv->mac_dev ? priv->mac_dev->port[RX] : NULL;
++	hw->res.tx_port = priv->mac_dev ? priv->mac_dev->port[TX] : NULL;
++	hw->res.rx_bound = !!hw->res.rx_port;
++	hw->res.tx_bound = !!hw->res.tx_port;
++	hw->res.keygen_api_available = priv->fman.rx.kg_scheme_api_available;
++	hw->res.generation = hw->plan.generation;
++	hw->res.binding = hw->plan.binding;
++
++	if (!hw->res.rx_port || !hw->res.tx_port) {
++		hw->resource_allocation_failures++;
++		hw->install_failures++;
++		hw->last_error = -EOPNOTSUPP;
++		dpaa_ft_hw_set_lifecycle(hw, DPAA_FT_HW_LIFECYCLE_INSTALL_FAILED);
++		result->lifecycle = hw->last_lifecycle;
++		result->degrade = DPAA_FT_HW_DEGRADE_INSTALL_FAILED;
++		result->reject_reason = DPAA_FT_REJECT_HW_INSTALL_FAILED;
++		result->err = -EOPNOTSUPP;
++		result->message = "hardware flow offloading requested, but the FMAN backend could not bind the staged install plan to RX and TX ports; flows stay on the normal Linux path";
++		dpaa_ft_hw_clear_plan(hw);
++		dpaa_ft_hw_clear_resources(hw);
++		return result->err;
++	}
++
++	err = fman_port_reserve_kg_scheme(hw->res.rx_port, &scheme_id);
++	if (err) {
++		hw->resource_allocation_failures++;
++		hw->install_failures++;
++		hw->last_error = err;
++		dpaa_ft_hw_set_lifecycle(hw, DPAA_FT_HW_LIFECYCLE_INSTALL_FAILED);
++		result->lifecycle = hw->last_lifecycle;
++		result->degrade = DPAA_FT_HW_DEGRADE_INSTALL_FAILED;
++		result->reject_reason = DPAA_FT_REJECT_HW_INSTALL_FAILED;
++		result->err = err;
++		result->message = "hardware flow offloading requested, but the FMAN backend could not reserve an RX KeyGen scheme for the staged install plan; flows stay on the normal Linux path";
++		dpaa_ft_hw_clear_plan(hw);
++		dpaa_ft_hw_clear_resources(hw);
++		return err;
++	}
++
++	hw->res.keygen_reserved = true;
++	hw->res.keygen_scheme_id = scheme_id;
++	hw->resource_allocations++;
++	dpaa_ft_hw_set_lifecycle(hw, DPAA_FT_HW_LIFECYCLE_RESOURCES_ALLOCATED);
++	result->lifecycle = hw->last_lifecycle;
++
++	return 0;
++}
++
++static int dpaa_ft_fman_hw_teardown_resources(struct dpaa_priv *priv,
++					      struct dpaa_ft_hw_result *result)
++{
++	struct dpaa_ft_hw_backend *hw = &priv->ft.hw;
++	int err = 0;
++
++	if (!hw->plan.valid && !hw->res.keygen_reserved) {
++		dpaa_ft_hw_clear_plan(hw);
++		dpaa_ft_hw_clear_resources(hw);
++		return 0;
++	}
++
++	dpaa_ft_hw_set_lifecycle(hw, DPAA_FT_HW_LIFECYCLE_TEARDOWN_PENDING);
++
++	if (hw->res.keygen_reserved && hw->res.rx_port) {
++		err = fman_port_release_kg_scheme(hw->res.rx_port,
++						  hw->res.keygen_scheme_id);
++		if (err) {
++			hw->resource_release_failures++;
++			hw->install_failures++;
++			hw->last_error = err;
++			result->lifecycle = DPAA_FT_HW_LIFECYCLE_INSTALL_FAILED;
++			result->degrade = DPAA_FT_HW_DEGRADE_INSTALL_FAILED;
++			result->reject_reason = DPAA_FT_REJECT_HW_INSTALL_FAILED;
++			result->err = err;
++			result->message = "hardware flow offloading requested, but the FMAN backend could not unwind a staged RX KeyGen reservation; flows stay on the normal Linux path";
++			dpaa_ft_hw_set_lifecycle(hw,
++					 DPAA_FT_HW_LIFECYCLE_INSTALL_FAILED);
++			return err;
++		}
++		hw->resource_releases++;
++	}
++
++	dpaa_ft_hw_clear_plan(hw);
++	dpaa_ft_hw_clear_resources(hw);
++	hw->teardown_completes++;
++	dpaa_ft_hw_set_lifecycle(hw, DPAA_FT_HW_LIFECYCLE_TEARDOWN_COMPLETE);
++	result->lifecycle = hw->last_lifecycle;
++
++	return 0;
++}
++
+ static bool
+ dpaa_ft_fman_hw_is_stage0_lowerable(struct dpaa_priv *priv,
+ 				    const struct dpaa_ft_entry *entry,
+@@ -1800,9 +1977,11 @@ static int dpaa_ft_fman_hw_dry_run(struct dpaa_priv *priv,
+ {
+ 	struct dpaa_ft_hw_backend *hw = &priv->ft.hw;
+ 	const char *reason = NULL;
++	int err;
+ 
+ 	memset(result, 0, sizeof(*result));
+ 	result->state = hw->state;
++	result->lifecycle = hw->last_lifecycle;
+ 	result->err = hw->last_error;
+ 	hw->dry_run_attempts++;
+ 
+@@ -1837,10 +2016,24 @@ static int dpaa_ft_fman_hw_dry_run(struct dpaa_priv *priv,
+ 	hw->dry_run_lowerable++;
+ 	hw->last_dry_run = DPAA_FT_HW_DRY_RUN_LOWERABLE;
+ 	result->dry_run = DPAA_FT_HW_DRY_RUN_LOWERABLE;
++	err = dpaa_ft_fman_hw_build_plan(priv, entry, result);
++	if (err)
++		return err;
++
++	err = dpaa_ft_fman_hw_alloc_resources(priv, result);
++	if (err)
++		return err;
++
++	hw->install_attempts++;
++	dpaa_ft_hw_set_lifecycle(hw, DPAA_FT_HW_LIFECYCLE_INSTALL_PENDING);
++	result->lifecycle = hw->last_lifecycle;
+ 	result->degrade = DPAA_FT_HW_DEGRADE_DRY_RUN_ONLY;
+ 	result->reject_reason = DPAA_FT_REJECT_HW_DRY_RUN_ONLY;
+ 	result->err = -EOPNOTSUPP;
+ 	result->message = "hardware flow offloading requested, and the FMAN backend dry-run says this exact contract appears lowerable, but live FMAN install is not enabled yet; flows stay on the normal Linux path";
++	err = dpaa_ft_fman_hw_teardown_resources(priv, result);
++	if (err)
++		return err;
+ 
+ 	return result->err;
+ }
+@@ -1849,11 +2042,13 @@ static int dpaa_ft_fman_hw_install_stub(struct dpaa_priv *priv,
+ 					struct dpaa_ft_entry *entry)
+ {
+ 	priv->ft.hw.install_attempts++;
+-	priv->ft.hw.state = DPAA_FT_HW_BACKEND_INSTALL_FAILED;
+ 	priv->ft.hw.install_failures++;
+ 	priv->ft.hw.last_error = -EOPNOTSUPP;
+-	entry->hw.state = DPAA_FT_HW_BACKEND_INSTALL_FAILED;
++	dpaa_ft_hw_set_lifecycle(&priv->ft.hw,
++				 DPAA_FT_HW_LIFECYCLE_INSTALL_FAILED);
++	entry->hw.state = DPAA_FT_HW_LIFECYCLE_INSTALL_FAILED;
+ 	entry->hw.last_error = -EOPNOTSUPP;
++	entry->hw.generation = priv->ft.hw.generation;
+ 
+ 	return -EOPNOTSUPP;
+ }
+@@ -1899,10 +2094,12 @@ static void dpaa_ft_hw_backend_prepare(struct dpaa_priv *priv)
+ {
+ 	const struct dpaa_ft_hw_backend_ops *ops = dpaa_ft_hw_backend_ops(priv);
+ 
+-	dpaa_ft_hw_reset_observation(&priv->ft.hw);
+-	priv->ft.hw.state = DPAA_FT_HW_BACKEND_NOT_IMPLEMENTED;
+-	if (!ops)
++	if (!ops) {
++		dpaa_ft_fman_hw_reset_owned_state(priv);
++		dpaa_ft_hw_reset_observation(&priv->ft.hw);
++		priv->ft.hw.state = DPAA_FT_HW_BACKEND_NOT_IMPLEMENTED;
+ 		return;
++	}
+ 
+ 	ops->prepare(priv);
+ }
+@@ -2336,6 +2533,7 @@ static int dpaa_ft_replace_hardware_locked(struct dpaa_priv *priv,
+ 	const struct dpaa_ft_hw_backend_ops *ops = dpaa_ft_hw_backend_ops(priv);
+ 	struct dpaa_ft_hw_result result = {
+ 		.state = DPAA_FT_HW_BACKEND_NOT_IMPLEMENTED,
++		.lifecycle = DPAA_FT_HW_LIFECYCLE_NONE,
+ 		.degrade = DPAA_FT_HW_DEGRADE_NOT_IMPLEMENTED,
+ 		.reject_reason = DPAA_FT_REJECT_HW_MODE_UNAVAILABLE,
+ 		.err = -EOPNOTSUPP,
+@@ -2361,8 +2559,9 @@ static int dpaa_ft_replace_hardware_locked(struct dpaa_priv *priv,
+ 	if (ops)
+ 		err = ops->dry_run(priv, entry, &result);
+ 
+-	entry->hw.state = result.state;
++	entry->hw.state = result.lifecycle;
+ 	entry->hw.last_error = result.err;
++	entry->hw.generation = priv->ft.hw.generation;
+ 	dpaa_ft_put_entry(entry);
+ 
+ 	dpaa_ft_hw_note_degrade(priv, result.degrade, result.message);
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth_sysfs.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth_sysfs.c
+index 694b1cb..e139fdd 100644
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth_sysfs.c
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth_sysfs.c
+@@ -159,6 +159,28 @@ static const char *dpaa_ft_hw_degrade_name(enum dpaa_ft_hw_degrade_reason reason
+ 	}
+ }
+ 
++static const char *
++dpaa_ft_hw_lifecycle_name(enum dpaa_ft_hw_lifecycle_state state)
++{
++	switch (state) {
++	case DPAA_FT_HW_LIFECYCLE_PLAN_BUILT:
++		return "plan_built";
++	case DPAA_FT_HW_LIFECYCLE_RESOURCES_ALLOCATED:
++		return "resources_allocated";
++	case DPAA_FT_HW_LIFECYCLE_INSTALL_PENDING:
++		return "install_pending";
++	case DPAA_FT_HW_LIFECYCLE_INSTALL_FAILED:
++		return "install_failed";
++	case DPAA_FT_HW_LIFECYCLE_TEARDOWN_PENDING:
++		return "teardown_pending";
++	case DPAA_FT_HW_LIFECYCLE_TEARDOWN_COMPLETE:
++		return "teardown_complete";
++	case DPAA_FT_HW_LIFECYCLE_NONE:
++	default:
++		return "none";
++	}
++}
++
+ static ssize_t dpaa_eth_show_ft_offload(struct device *dev,
+ 					struct device_attribute *attr,
+ 					char *buf)
+@@ -201,6 +223,11 @@ static ssize_t dpaa_eth_show_ft_offload(struct device *dev,
+ 	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
+ 			   "hw.degrade.last %s\n",
+ 			   dpaa_ft_hw_degrade_name(priv->ft.hw.last_degrade));
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++			   "hw.lifecycle.last %s\n",
++			   dpaa_ft_hw_lifecycle_name(priv->ft.hw.last_lifecycle));
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++			   "hw.generation %u\n", priv->ft.hw.generation);
+ 	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
+ 			   "hw.last_error %d\n", priv->ft.hw.last_error);
+ 	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
+@@ -212,6 +239,30 @@ static ssize_t dpaa_eth_show_ft_offload(struct device *dev,
+ 	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
+ 			   "hw.dryrun.not_lowerable %llu\n",
+ 			   priv->ft.hw.dry_run_not_lowerable);
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++			   "hw.plan.builds %llu\n",
++			   priv->ft.hw.plan_builds);
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++			   "hw.plan.failures %llu\n",
++			   priv->ft.hw.plan_failures);
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++			   "hw.resources.allocations %llu\n",
++			   priv->ft.hw.resource_allocations);
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++			   "hw.resources.allocation_failures %llu\n",
++			   priv->ft.hw.resource_allocation_failures);
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++			   "hw.resources.releases %llu\n",
++			   priv->ft.hw.resource_releases);
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++			   "hw.resources.release_failures %llu\n",
++			   priv->ft.hw.resource_release_failures);
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++			   "hw.teardown.completes %llu\n",
++			   priv->ft.hw.teardown_completes);
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++			   "hw.resources.keygen_reserved %u\n",
++			   priv->ft.hw.res.keygen_reserved ? 1 : 0);
+ 	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
+ 			   "hw.install.attempts %llu\n",
+ 			   priv->ft.hw.install_attempts);
+@@ -247,6 +298,9 @@ static ssize_t dpaa_eth_show_ft_offload(struct device *dev,
+ 		bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
+ 				   "fman.rx_kg_scheme_in_use %u\n",
+ 				   priv->fman.rx.kg_scheme_in_use);
++		bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++				   "fman.rx_kg_scheme_reserved %u\n",
++				   priv->fman.rx.kg_scheme_reserved);
+ 		bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
+ 				   "fman.rx_kg_scheme_free %u\n",
+ 				   priv->fman.rx.kg_scheme_free);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.h b/drivers/net/ethernet/freescale/fman/fman_keygen.h
+index 9611c50..28429d4 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.h
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.h
+@@ -14,6 +14,7 @@ struct fman_kg_regs;
+ struct fman_keygen_state {
+ 	u8 scheme_total;
+ 	u8 scheme_in_use;
++	u8 scheme_reserved;
+ };
+ 
+ struct fman_kg_scheme_params {
+@@ -34,6 +35,10 @@ struct fman_keygen *keygen_init(struct fman_kg_regs __iomem *keygen_regs);
+ int keygen_get_state(struct fman_keygen *keygen,
+ 		     struct fman_keygen_state *state);
+ 
++int keygen_port_scheme_reserve(struct fman_keygen *keygen, u8 hw_port_id,
++			       u8 *scheme_id);
++int keygen_port_scheme_release(struct fman_keygen *keygen, u8 scheme_id);
++
+ int keygen_port_scheme_alloc(struct fman_keygen *keygen, u8 hw_port_id,
+ 			     const struct fman_kg_scheme_params *params,
+ 			     u8 *scheme_id);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_keygen.c b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+index 9099c18..68dc84e 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -196,6 +196,7 @@ struct fman_kg_regs {
+ /* KeyGen Scheme data */
+ struct keygen_scheme {
+ 	bool used;	/* Specifies if this scheme is used */
++	bool reserved;	/* Reserved for a later staged install */
+ 	u8 hw_port_id;
+ 		/* Hardware port ID
+ 		 * schemes sharing between multiple ports is not
+@@ -424,7 +425,8 @@ static int get_free_scheme_id(struct fman_keygen *keygen, u8 *scheme_id)
+ 	u8 i;
+ 
+ 	for (i = 0; i < FM_KG_MAX_NUM_OF_SCHEMES; i++)
+-		if (!keygen->schemes[i].used) {
++		if (!keygen->schemes[i].used &&
++		    !keygen->schemes[i].reserved) {
+ 			*scheme_id = i;
+ 			return 0;
+ 		}
+@@ -608,6 +610,8 @@ static int keygen_scheme_setup(struct fman_keygen *keygen, u8 scheme_id,
+ 
+ 	/* Update used field for Scheme */
+ 	scheme->used = enable;
++	if (enable)
++		scheme->reserved = false;
+ 
+ 	return 0;
+ }
+@@ -677,7 +681,7 @@ EXPORT_SYMBOL(keygen_init);
+ int keygen_get_state(struct fman_keygen *keygen,
+ 		     struct fman_keygen_state *state)
+ {
+-	u8 i, used = 0;
++	u8 i, used = 0, reserved = 0;
+ 
+ 	if (!keygen || !state)
+ 		return -EINVAL;
+@@ -685,14 +689,64 @@ int keygen_get_state(struct fman_keygen *keygen,
+ 	for (i = 0; i < FM_KG_MAX_NUM_OF_SCHEMES; i++)
+ 		if (keygen->schemes[i].used)
+ 			used++;
++		else if (keygen->schemes[i].reserved)
++			reserved++;
+ 
+ 	state->scheme_total = FM_KG_MAX_NUM_OF_SCHEMES;
+ 	state->scheme_in_use = used;
++	state->scheme_reserved = reserved;
+ 
+ 	return 0;
+ }
+ EXPORT_SYMBOL(keygen_get_state);
+ 
++int keygen_port_scheme_reserve(struct fman_keygen *keygen, u8 hw_port_id,
++			       u8 *scheme_id)
++{
++	struct keygen_scheme *scheme;
++	u8 id;
++	int err;
++
++	if (!keygen || !scheme_id)
++		return -EINVAL;
++
++	if (hw_port_id >= FMAN_MAX_NUM_OF_HW_PORTS)
++		return -EINVAL;
++
++	err = get_free_scheme_id(keygen, &id);
++	if (err)
++		return -ENOSPC;
++
++	scheme = get_scheme(keygen, id);
++	if (!scheme)
++		return -EINVAL;
++
++	memset(scheme, 0, sizeof(*scheme));
++	scheme->reserved = true;
++	scheme->hw_port_id = hw_port_id;
++	*scheme_id = id;
++
++	return 0;
++}
++EXPORT_SYMBOL(keygen_port_scheme_reserve);
++
++int keygen_port_scheme_release(struct fman_keygen *keygen, u8 scheme_id)
++{
++	struct keygen_scheme *scheme;
++
++	if (!keygen)
++		return -EINVAL;
++
++	scheme = get_scheme(keygen, scheme_id);
++	if (!scheme || !scheme->reserved || scheme->used)
++		return -ENOENT;
++
++	memset(scheme, 0, sizeof(*scheme));
++
++	return 0;
++}
++EXPORT_SYMBOL(keygen_port_scheme_release);
++
+ int keygen_port_scheme_alloc(struct fman_keygen *keygen, u8 hw_port_id,
+ 			     const struct fman_kg_scheme_params *params,
+ 			     u8 *scheme_id)
+@@ -720,25 +774,16 @@ int keygen_port_scheme_alloc(struct fman_keygen *keygen, u8 hw_port_id,
+ 		return -EINVAL;
+ 	}
+ 
+-	err = get_free_scheme_id(keygen, &id);
++	err = keygen_port_scheme_reserve(keygen, hw_port_id, &id);
+ 	if (err) {
+ 		pr_err("The maximum number of available Schemes has been exceeded\n");
+-		return -EINVAL;
++		return err;
+ 	}
+ 
+ 	scheme = get_scheme(keygen, id);
+-	if (!scheme) {
+-		pr_err("Requested Scheme does not exist\n");
+-		return -EINVAL;
+-	}
+-	if (scheme->used) {
+-		pr_err("The requested Scheme is already used\n");
++	if (!scheme)
+ 		return -EINVAL;
+-	}
+ 
+-	memset(scheme, 0, sizeof(*scheme));
+-
+-	scheme->hw_port_id = hw_port_id;
+ 	scheme->base_fqid = params->base_fqid;
+ 	scheme->hash_fqid_count = params->use_hashing ?
+ 				  params->hash_fqid_count : 1;
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.h b/drivers/net/ethernet/freescale/fman/fman_port.h
+index 034711a..51800a1 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -76,6 +76,7 @@ struct fman_port_offload_info {
+ 	bool kg_scheme_api_available;
+ 	u8 kg_scheme_total;
+ 	u8 kg_scheme_in_use;
++	u8 kg_scheme_reserved;
+ 	u8 kg_scheme_free;
+ };
+ 
+@@ -143,6 +144,10 @@ int fman_port_add_kg_scheme(struct fman_port *port,
+ 
+ int fman_port_del_kg_scheme(struct fman_port *port, u8 scheme_id);
+ 
++int fman_port_reserve_kg_scheme(struct fman_port *port, u8 *scheme_id);
++
++int fman_port_release_kg_scheme(struct fman_port *port, u8 scheme_id);
++
+ int fman_port_get_hash_result_offset(struct fman_port *port, u32 *offset);
+ 
+ int fman_port_get_tstamp(struct fman_port *port, const void *data, u64 *tstamp);
+diff --git a/drivers/net/ethernet/freescale/fman/fman_port.c b/drivers/net/ethernet/freescale/fman/fman_port.c
+index f716b30..ceb1af2 100644
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -1732,7 +1732,10 @@ int fman_port_get_offload_info(struct fman_port *port,
+ 	info->kg_scheme_api_available = true;
+ 	info->kg_scheme_total = kg_state.scheme_total;
+ 	info->kg_scheme_in_use = kg_state.scheme_in_use;
+-	info->kg_scheme_free = kg_state.scheme_total - kg_state.scheme_in_use;
++	info->kg_scheme_reserved = kg_state.scheme_reserved;
++	info->kg_scheme_free = kg_state.scheme_total -
++			       kg_state.scheme_in_use -
++			       kg_state.scheme_reserved;
+ 
+ 	return 0;
+ }
+@@ -1771,6 +1774,38 @@ int fman_port_del_kg_scheme(struct fman_port *port, u8 scheme_id)
+ }
+ EXPORT_SYMBOL(fman_port_del_kg_scheme);
+ 
++int fman_port_reserve_kg_scheme(struct fman_port *port, u8 *scheme_id)
++{
++	if (!port || !scheme_id)
++		return -EINVAL;
++
++	if (port->port_type != FMAN_PORT_TYPE_RX)
++		return -EOPNOTSUPP;
++
++	if (!port->dts_params.fman || !port->dts_params.fman->keygen)
++		return -EOPNOTSUPP;
++
++	return keygen_port_scheme_reserve(port->dts_params.fman->keygen,
++					  port->port_id, scheme_id);
++}
++EXPORT_SYMBOL(fman_port_reserve_kg_scheme);
++
++int fman_port_release_kg_scheme(struct fman_port *port, u8 scheme_id)
++{
++	if (!port)
++		return -EINVAL;
++
++	if (port->port_type != FMAN_PORT_TYPE_RX)
++		return -EOPNOTSUPP;
++
++	if (!port->dts_params.fman || !port->dts_params.fman->keygen)
++		return -EOPNOTSUPP;
++
++	return keygen_port_scheme_release(port->dts_params.fman->keygen,
++					  scheme_id);
++}
++EXPORT_SYMBOL(fman_port_release_kg_scheme);
++
+ /**
+  * fman_port_get_device
+  * @port:	Pointer to the FMan port device
