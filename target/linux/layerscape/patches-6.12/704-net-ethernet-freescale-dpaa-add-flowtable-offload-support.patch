@@ -4,6 +4,8 @@ Subject: [PATCH] net: ethernet: freescale: dpaa: add flowtable offload support
 Add DPAA flowtable offload support with these pieces:
 
 - bind to the stock `TC_SETUP_FT` flowtable hook
+- let opt-in devices route software flowtables through that same hook
+  without claiming true hardware offload
 - compile supported flowtable rules into driver-owned records
 - validate matches and actions up front and reject unsupported shapes
   with per-reason counters
@@ -18,6 +20,176 @@ This patch adds the install-time data model and the initial packet
 execution path for compiled flowtable entries.
 
 ---
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -2025,7 +2025,8 @@ struct net_device {
+ 	__cacheline_group_begin(net_device_read_tx);
+ 	struct_group(priv_flags_fast,
+ 		unsigned long		priv_flags:32;
+ 		unsigned long		lltx:1;
++		unsigned long		nf_flowtable_sw_offload:1;
+ 	);
+ 	const struct net_device_ops *netdev_ops;
+ 	const struct header_ops *header_ops;
+--- a/include/net/flow_offload.h
++++ b/include/net/flow_offload.h
+@@ -577,15 +577,21 @@ enum flow_block_binder_type {
+ 	FLOW_BLOCK_BINDER_TYPE_RED_MARK,
+ };
+ 
++enum flow_block_offload_mode {
++	FLOW_BLOCK_OFFLOAD_MODE_SOFTWARE,
++	FLOW_BLOCK_OFFLOAD_MODE_HARDWARE,
++};
++
+ struct flow_block {
+ 	struct list_head cb_list;
+ };
+ 
+ struct netlink_ext_ack;
+ 
+ struct flow_block_offload {
+ 	enum flow_block_command command;
+ 	enum flow_block_binder_type binder_type;
++	enum flow_block_offload_mode offload_mode;
+ 	bool block_shared;
+ 	bool unlocked_driver_cb;
+ 	struct net *net;
+--- a/include/net/netfilter/nf_flow_table.h
++++ b/include/net/netfilter/nf_flow_table.h
+@@ -70,7 +70,8 @@ struct nf_flowtable_type {
+ 
+ enum nf_flowtable_flags {
+ 	NF_FLOWTABLE_HW_OFFLOAD		= 0x1,	/* NFT_FLOWTABLE_HW_OFFLOAD */
+ 	NF_FLOWTABLE_COUNTER		= 0x2,	/* NFT_FLOWTABLE_COUNTER */
++	NF_FLOWTABLE_DRIVER_OFFLOAD	= 0x4,	/* internal TC-managed software path */
+ };
+ 
+ struct nf_flowtable {
+@@ -89,6 +90,17 @@ static inline bool nf_flowtable_hw_offload(struct nf_flowtable *flowtable)
+ 	return flowtable->flags & NF_FLOWTABLE_HW_OFFLOAD;
+ }
+ 
++static inline bool nf_flowtable_driver_offload(struct nf_flowtable *flowtable)
++{
++	return flowtable->flags & NF_FLOWTABLE_DRIVER_OFFLOAD;
++}
++
++static inline bool nf_flowtable_tc_offload(struct nf_flowtable *flowtable)
++{
++	return nf_flowtable_hw_offload(flowtable) ||
++	       nf_flowtable_driver_offload(flowtable);
++}
++
+ enum flow_offload_tuple_dir {
+ 	FLOW_OFFLOAD_DIR_ORIGINAL = IP_CT_DIR_ORIGINAL,
+ 	FLOW_OFFLOAD_DIR_REPLY = IP_CT_DIR_REPLY,
+--- a/net/netfilter/nf_flow_table_core.c
++++ b/net/netfilter/nf_flow_table_core.c
+@@ -295,7 +295,7 @@ int flow_offload_add(struct nf_flowtable *flow_table, struct flow_offload *flow)
+ 
+ 	nf_ct_offload_timeout(flow->ct);
+ 
+-	if (nf_flowtable_hw_offload(flow_table)) {
++	if (nf_flowtable_tc_offload(flow_table)) {
+ 		__set_bit(NF_FLOW_HW, &flow->flags);
+ 		nf_flow_offload_add(flow_table, flow);
+ 	}
+@@ -315,7 +315,7 @@ void flow_offload_refresh(struct nf_flowtable *flow_table,
+ 	else
+ 		return;
+ 
+-	if (likely(!nf_flowtable_hw_offload(flow_table)))
++	if (likely(!nf_flowtable_tc_offload(flow_table)))
+ 		return;
+ 
+ 	nf_flow_offload_add(flow_table, flow);
+--- a/net/netfilter/nf_flow_table_offload.c
++++ b/net/netfilter/nf_flow_table_offload.c
+@@ -917,7 +917,10 @@ static void flow_offload_work_add(struct flow_offload_work *offload)
+ 	if (err < 0)
+ 		goto out;
+ 
+-	set_bit(IPS_HW_OFFLOAD_BIT, &offload->flow->ct->status);
++	if (nf_flowtable_hw_offload(offload->flowtable))
++		set_bit(IPS_HW_OFFLOAD_BIT, &offload->flow->ct->status);
++	else
++		clear_bit(IPS_HW_OFFLOAD_BIT, &offload->flow->ct->status);
+ 
+ out:
+ 	nf_flow_offload_destroy(flow_rule);
+@@ -1080,17 +1083,17 @@ void nf_flow_offload_stats(struct nf_flowtable *flowtable,
+ 
+ void nf_flow_table_offload_flush_cleanup(struct nf_flowtable *flowtable)
+ {
+-	if (nf_flowtable_hw_offload(flowtable)) {
++	if (nf_flowtable_tc_offload(flowtable)) {
+ 		flush_workqueue(nf_flow_offload_del_wq);
+ 		nf_flow_table_gc_run(flowtable);
+ 	}
+ }
+ 
+ void nf_flow_table_offload_flush(struct nf_flowtable *flowtable)
+ {
+-	if (nf_flowtable_hw_offload(flowtable)) {
++	if (nf_flowtable_tc_offload(flowtable)) {
+ 		flush_workqueue(nf_flow_offload_add_wq);
+ 		flush_workqueue(nf_flow_offload_del_wq);
+ 		flush_workqueue(nf_flow_offload_stats_wq);
+ 	}
+ }
+@@ -1130,6 +1133,9 @@ static void nf_flow_table_block_offload_init(struct flow_block_offload *bo,
+ 	bo->block	= &flowtable->flow_block;
+ 	bo->command	= cmd;
+ 	bo->binder_type	= FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS;
++	bo->offload_mode = nf_flowtable_hw_offload(flowtable) ?
++			   FLOW_BLOCK_OFFLOAD_MODE_HARDWARE :
++			   FLOW_BLOCK_OFFLOAD_MODE_SOFTWARE;
+ 	bo->extack	= extack;
+ 	bo->cb_list_head = &flowtable->flow_block.cb_list;
+ 	INIT_LIST_HEAD(&bo->cb_list);
+@@ -1188,16 +1194,28 @@ int nf_flow_table_offload_setup(struct nf_flowtable *flowtable,
+ 	struct flow_block_offload bo;
++	bool driver_offload = !nf_flowtable_hw_offload(flowtable) &&
++				     dev->nf_flowtable_sw_offload;
+ 	int err;
+ 
+-	if (!nf_flowtable_hw_offload(flowtable))
++	if (!nf_flowtable_hw_offload(flowtable) &&
++	    !dev->nf_flowtable_sw_offload)
+ 		return nf_flow_offload_xdp_setup(flowtable, dev, cmd);
+ 
+ 	if (dev->netdev_ops->ndo_setup_tc)
+ 		err = nf_flow_table_offload_cmd(&bo, flowtable, dev, cmd,
+ 						&extack);
+ 	else
+ 		err = nf_flow_table_indr_offload_cmd(&bo, flowtable, dev, cmd,
+ 						     &extack);
+ 	if (err < 0)
+ 		return err;
+ 
+-	return nf_flow_table_block_setup(flowtable, &bo, cmd);
++	err = nf_flow_table_block_setup(flowtable, &bo, cmd);
++	if (err < 0)
++		return err;
++
++	if (driver_offload && cmd == FLOW_BLOCK_BIND)
++		flowtable->flags |= NF_FLOWTABLE_DRIVER_OFFLOAD;
++	else if (driver_offload && cmd == FLOW_BLOCK_UNBIND)
++		flowtable->flags &= ~NF_FLOWTABLE_DRIVER_OFFLOAD;
++
++	return 0;
+--- a/net/netfilter/nft_flow_offload.c
++++ b/net/netfilter/nft_flow_offload.c
+@@ -170,7 +170,7 @@ static void nft_dev_path_info(struct net_device_path_stack *stack,
+ 
+ 	info->hw_outdev = info->indev;
+ 
+-	if (nf_flowtable_hw_offload(flowtable) &&
++	if (nf_flowtable_tc_offload(flowtable) &&
+ 	    nft_is_valid_ether_device(info->indev))
+ 		info->xmit_type = FLOW_OFFLOAD_XMIT_DIRECT;
+ }
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
 @@ -6,8 +6,12 @@
@@ -41,7 +213,7 @@ execution path for compiled flowtable entries.
  
  /* More detailed FQ types - used for fine-grained WQ assignments */
  enum dpaa_fq_type {
-@@ -127,6 +132,103 @@
+@@ -127,6 +132,126 @@
  	struct xdp_frame *xdpf;
  };
  
@@ -67,7 +239,26 @@ execution path for compiled flowtable entries.
 +	DPAA_FT_REJECT_DUPLICATE_COOKIE,
 +	DPAA_FT_REJECT_DUPLICATE_TUPLE,
 +	DPAA_FT_REJECT_NO_MEMORY,
++	DPAA_FT_REJECT_HW_MODE_UNAVAILABLE,
 +	DPAA_FT_REJECT_MAX,
++};
++
++enum dpaa_ft_requested_mode {
++	DPAA_FT_REQUESTED_MODE_UNKNOWN = 0,
++	DPAA_FT_REQUESTED_MODE_SOFTWARE,
++	DPAA_FT_REQUESTED_MODE_HARDWARE,
++};
++
++enum dpaa_ft_active_mode {
++	DPAA_FT_ACTIVE_MODE_NONE = 0,
++	DPAA_FT_ACTIVE_MODE_SOFTWARE,
++	DPAA_FT_ACTIVE_MODE_HARDWARE,
++};
++
++enum dpaa_ft_hw_backend_state {
++	DPAA_FT_HW_BACKEND_NOT_IMPLEMENTED = 0,
++	DPAA_FT_HW_BACKEND_DISABLED,
++	DPAA_FT_HW_BACKEND_READY,
 +};
 +
 +enum dpaa_ft_fallback_reason {
@@ -139,6 +330,10 @@ execution path for compiled flowtable entries.
 +	u64 stats_queries;
 +	atomic64_t hits;
 +	atomic64_t fallbacks[DPAA_FT_FALLBACK_MAX];
++	enum dpaa_ft_requested_mode requested_mode;
++	enum dpaa_ft_active_mode active_mode;
++	enum dpaa_ft_hw_backend_state hw_backend_state;
++	bool hw_unavailable_logged;
 +	u64 rejects[DPAA_FT_REJECT_MAX];
 +};
 +
@@ -179,7 +374,7 @@ execution path for compiled flowtable entries.
  #include <soc/fsl/bman.h>
  #include <soc/fsl/qman.h>
  #include "fman.h"
-@@ -51,6 +57,32 @@
+@@ -51,6 +57,33 @@
  module_param(tx_timeout, ushort, 0444);
  MODULE_PARM_DESC(tx_timeout, "The Tx timeout in ms");
  
@@ -199,6 +394,7 @@ execution path for compiled flowtable entries.
 +	[DPAA_FT_REJECT_DUPLICATE_COOKIE] = "duplicate_cookie",
 +	[DPAA_FT_REJECT_DUPLICATE_TUPLE] = "duplicate_tuple",
 +	[DPAA_FT_REJECT_NO_MEMORY] = "no_memory",
++	[DPAA_FT_REJECT_HW_MODE_UNAVAILABLE] = "hw_mode_unavailable",
 +};
 +static_assert(ARRAY_SIZE(dpaa_ft_reject_names) == DPAA_FT_REJECT_MAX);
 +
@@ -212,7 +408,7 @@ execution path for compiled flowtable entries.
  #define FM_FD_STAT_RX_ERRORS						\
  	(FM_FD_ERR_DMA | FM_FD_ERR_PHYSICAL	| \
  	 FM_FD_ERR_SIZE | FM_FD_ERR_CLS_DISCARD | \
-@@ -367,6 +399,960 @@
+@@ -367,6 +399,1039 @@
  	}
  }
  
@@ -1037,26 +1233,75 @@ execution path for compiled flowtable entries.
 +	return true;
 +}
 +
-+static void dpaa_ft_destroy_all(struct dpaa_priv *priv)
++static void dpaa_ft_destroy_all_locked(struct dpaa_priv *priv)
 +{
 +	struct dpaa_ft_entry *entry;
 +	struct hlist_node *tmp;
++	unsigned long removed = 0;
 +	int bkt;
 +
-+	mutex_lock(&priv->ft.lock);
 +	hash_for_each_safe(priv->ft.flows, bkt, tmp, entry, node) {
 +		hash_del(&entry->node);
 +		hash_del_rcu(&entry->tuple_node);
 +		call_rcu(&entry->rcu, dpaa_ft_put_entry_rcu);
++		removed++;
 +	}
 +	priv->ft.active = 0;
++	priv->ft.destroys += removed;
++}
++
++static void dpaa_ft_destroy_all(struct dpaa_priv *priv)
++{
++	mutex_lock(&priv->ft.lock);
++	dpaa_ft_destroy_all_locked(priv);
 +	mutex_unlock(&priv->ft.lock);
++}
++
++static int dpaa_ft_reject_hw_mode_locked(struct dpaa_priv *priv,
++					 struct flow_cls_offload *cls)
++{
++	if (cls->common.extack)
++		NL_SET_ERR_MSG_MOD(cls->common.extack,
++				   "Hardware flow offloading is not available yet on this target");
++
++	return dpaa_ft_reject_locked(priv, cls,
++				     DPAA_FT_REJECT_HW_MODE_UNAVAILABLE,
++				     -EOPNOTSUPP,
++				     "Hardware flow offloading is not available yet on this target");
++}
++
++static void dpaa_ft_bind_mode_locked(struct dpaa_priv *priv, bool hw_offload)
++{
++	dpaa_ft_destroy_all_locked(priv);
++	priv->ft.requested_mode = hw_offload ?
++				  DPAA_FT_REQUESTED_MODE_HARDWARE :
++				  DPAA_FT_REQUESTED_MODE_SOFTWARE;
++	priv->ft.active_mode = hw_offload ?
++			       DPAA_FT_ACTIVE_MODE_NONE :
++			       DPAA_FT_ACTIVE_MODE_SOFTWARE;
++	priv->ft.hw_backend_state = DPAA_FT_HW_BACKEND_NOT_IMPLEMENTED;
++	priv->ft.hw_unavailable_logged = hw_offload;
++}
++
++static void dpaa_ft_unbind_mode_locked(struct dpaa_priv *priv)
++{
++	dpaa_ft_destroy_all_locked(priv);
++	priv->ft.requested_mode = DPAA_FT_REQUESTED_MODE_UNKNOWN;
++	priv->ft.active_mode = DPAA_FT_ACTIVE_MODE_NONE;
++	priv->ft.hw_backend_state = DPAA_FT_HW_BACKEND_NOT_IMPLEMENTED;
++	priv->ft.hw_unavailable_logged = false;
 +}
 +
 +static int dpaa_ft_replace(struct dpaa_priv *priv, struct flow_cls_offload *cls)
 +{
 +	struct dpaa_ft_entry *entry;
 +	int err;
++
++	if (priv->ft.requested_mode == DPAA_FT_REQUESTED_MODE_HARDWARE)
++		return dpaa_ft_reject_hw_mode_locked(priv, cls);
++
++	if (priv->ft.requested_mode != DPAA_FT_REQUESTED_MODE_SOFTWARE)
++		return -EOPNOTSUPP;
 +
 +	if (dpaa_ft_lookup_locked(priv, cls->cookie))
 +		return dpaa_ft_reject_locked(priv, cls,
@@ -1170,10 +1415,40 @@ execution path for compiled flowtable entries.
 +	return dpaa_ft_offload_cmd(priv, type_data);
 +}
 +
++static int dpaa_ft_setup_block(struct dpaa_priv *priv,
++			       struct flow_block_offload *bo)
++{
++	bool hw_offload = bo->offload_mode == FLOW_BLOCK_OFFLOAD_MODE_HARDWARE;
++	bool report_hw_unavailable = false;
++	int err;
++
++	err = flow_block_cb_setup_simple(bo, &dpaa_ft_block_cb_list,
++					 dpaa_setup_ft_cb,
++					 priv, priv, true);
++	if (err < 0)
++		return err;
++
++	mutex_lock(&priv->ft.lock);
++	if (bo->command == FLOW_BLOCK_BIND)
++		report_hw_unavailable = hw_offload &&
++				       !priv->ft.hw_unavailable_logged;
++	if (bo->command == FLOW_BLOCK_BIND)
++		dpaa_ft_bind_mode_locked(priv, hw_offload);
++	else if (bo->command == FLOW_BLOCK_UNBIND)
++		dpaa_ft_unbind_mode_locked(priv);
++	mutex_unlock(&priv->ft.lock);
++
++	if (report_hw_unavailable)
++		net_warn_ratelimited("%s: hardware flow offloading requested, but no FMAN backend is available yet on this target; DPAA offload stays disabled and flows remain on the normal Linux path\n",
++				     netdev_name(priv->net_dev));
++
++	return 0;
++}
++
  static int dpaa_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
  			 void *type_data)
  {
-@@ -376,8 +1362,17 @@
+@@ -376,8 +1362,14 @@
  	u8 num_tc;
  	int i;
  
@@ -1182,10 +1457,7 @@ execution path for compiled flowtable entries.
 +	case TC_SETUP_QDISC_MQPRIO:
 +		break;
 +	case TC_SETUP_FT:
-+		return flow_block_cb_setup_simple(type_data,
-+						  &dpaa_ft_block_cb_list,
-+						  dpaa_setup_ft_cb,
-+						  priv, priv, true);
++		return dpaa_ft_setup_block(priv, type_data);
 +	default:
  		return -EOPNOTSUPP;
 +	}
@@ -1202,9 +1474,11 @@ execution path for compiled flowtable entries.
  	skb->protocol = eth_type_trans(skb, net_dev);
  
  	/* Set the previously extracted hash */
-@@ -3340,6 +4338,12 @@
+@@ -3340,7 +4338,15 @@
  	priv->net_dev = net_dev;
  
++	net_dev->nf_flowtable_sw_offload = 1;
++
  	priv->msg_enable = netif_msg_init(debug, DPAA_MSG_DEFAULT);
 +	mutex_init(&priv->ft.lock);
 +	hash_init(priv->ft.flows);
@@ -1215,6 +1489,7 @@ execution path for compiled flowtable entries.
  
  	priv->egress_fqs = devm_kcalloc(dev, dpaa_max_num_txqs(),
  					sizeof(*priv->egress_fqs),
+ 					GFP_KERNEL);
 @@ -3532,6 +4536,7 @@
  	priv = netdev_priv(net_dev);
  

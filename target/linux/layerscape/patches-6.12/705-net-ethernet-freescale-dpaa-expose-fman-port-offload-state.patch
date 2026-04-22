@@ -117,10 +117,31 @@ diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth_sysfs.c b/drivers/net/
 index 8c1a21e..d0deb06 100644
 --- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth_sysfs.c
 +++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth_sysfs.c
-@@ -129,6 +129,25 @@ static ssize_t dpaa_eth_show_ft_offload(struct device *dev,
+@@ -129,6 +129,46 @@ static ssize_t dpaa_eth_show_ft_offload(struct device *dev,
  			   priv->ft.stats_queries);
  	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes, "hits %lld\n",
  			   atomic64_read(&priv->ft.hits));
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++			   "mode.requested %s\n",
++			   priv->ft.requested_mode ==
++			   DPAA_FT_REQUESTED_MODE_HARDWARE ? "hardware" :
++			   priv->ft.requested_mode ==
++			   DPAA_FT_REQUESTED_MODE_SOFTWARE ? "software" :
++			   "unknown");
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++			   "mode.active %s\n",
++			   priv->ft.active_mode ==
++			   DPAA_FT_ACTIVE_MODE_HARDWARE ? "hardware" :
++			   priv->ft.active_mode ==
++			   DPAA_FT_ACTIVE_MODE_SOFTWARE ? "software" :
++			   "none");
++	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
++			   "hw.backend_state %s\n",
++			   priv->ft.hw_backend_state ==
++			   DPAA_FT_HW_BACKEND_READY ? "ready" :
++			   priv->ft.hw_backend_state ==
++			   DPAA_FT_HW_BACKEND_DISABLED ? "disabled" :
++			   "not_implemented");
 +	bytes += scnprintf(buf + bytes, PAGE_SIZE - bytes,
 +			   "fman.ports_bound %u\n",
 +			   priv->fman.ports_bound ? 1 : 0);
