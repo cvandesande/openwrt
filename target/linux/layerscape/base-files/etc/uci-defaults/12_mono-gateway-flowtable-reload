@@ -1,0 +1,21 @@
+#!/bin/sh
+
+. /lib/functions/system.sh
+
+case "$(board_name)" in
+mono,gateway-dk|\
+mono,gateway-dk-sdboot)
+		;;
+*)
+	exit 0
+	;;
+esac
+
+case "$(uci -q get firewall.@defaults[0].lower_device_flowtable_reload)" in
+'')
+	uci set firewall.@defaults[0].lower_device_flowtable_reload='1'
+	uci commit firewall
+	;;
+esac
+
+exit 0

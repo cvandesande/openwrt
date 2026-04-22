@@ -1,0 +1,9 @@
+chain user_pre_forward {
+	type filter hook forward priority -1; policy accept;
+
+	# Keep the shared-lower mz/iot path out of flowtable offload until
+	# lower-device disambiguation exists for that topology.
+	iifname "br-mz" oifname "eth1.18" counter jump accept_to_iot comment "Bypass flowtable for mz to iot shared-lower forwarding"
+	iifname "eth1.18" oifname "br-mz" tcp dport { 111, 2049, 32765-32769 } counter jump accept_to_mz comment "Bypass flowtable for iot NFS to mz shared-lower forwarding"
+	iifname "eth1.18" oifname "br-mz" udp dport { 111, 2049, 32765-32769 } counter jump accept_to_mz comment "Bypass flowtable for iot NFS to mz shared-lower forwarding"
+}

@@ -1,0 +1,131 @@
+#!/bin/sh
+
+[ "$ACTION" = ifup -o "$ACTION" = ifupdate ] || exit 0
+[ "$ACTION" = ifupdate -a -z "$IFUPDATE_ADDRESSES" -a -z "$IFUPDATE_DATA" ] && exit 0
+[ "$INTERFACE" = "wan" ] || exit 0
+
+/etc/init.d/firewall enabled || exit 0
+command -v fw4 >/dev/null 2>&1 || exit 0
+command -v nft >/dev/null 2>&1 || exit 0
+
+case "$(uci -q get firewall.@defaults[0].flow_offloading)" in
+1|on|true|yes)
+	;;
+*)
+	exit 0
+	;;
+esac
+
+# Keep lower-device flowtable correction explicitly gated. The Mono Gateway
+# target seeds this from UCI defaults, but the guard remains a policy choice,
+# not datapath architecture.
+case "$(uci -q get firewall.@defaults[0].lower_device_flowtable_reload)" in
+1|on|true|yes)
+	;;
+*)
+	exit 0
+	;;
+esac
+
+DONE=/var/run/firewall-late-reload.done
+LOCK=/var/run/firewall-late-reload.lock
+
+[ -e "$DONE" ] && exit 0
+mkdir "$LOCK" 2>/dev/null || exit 0
+
+flowtable_block() {
+	sed -n '/^[[:space:]]*flowtable[[:space:]]\+ft[[:space:]]*{/,/^[[:space:]]*}[[:space:]]*$/p'
+}
+
+extract_flowtable_devices() {
+	sed -n 's/.*devices[[:space:]]*=[[:space:]]*{[[:space:]]*\(.*\)[[:space:]]*}.*/\1/p' |
+		tr ',' '\n' |
+		tr -d '"' |
+		sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
+		sed '/^$/d'
+}
+
+resolve_flowtable_device() {
+	dev="$1"
+	found=0
+
+	[ -n "$dev" ] || return 0
+
+	if [ ! -e "/sys/class/net/$dev" ]; then
+		printf '%s\n' "$dev"
+		return 0
+	fi
+
+	for lower in /sys/class/net/"$dev"/lower_*; do
+		[ -e "$lower" ] || continue
+		found=1
+		resolve_flowtable_device "${lower##*/lower_}"
+	done
+
+	[ "$found" -eq 0 ] && printf '%s\n' "$dev"
+}
+
+sorted_device_set() {
+	LC_ALL=C sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+}
+
+live_flowtable_devices() {
+	nft list table inet fw4 2>/dev/null | flowtable_block | extract_flowtable_devices
+}
+
+live_flowtable_device_set() {
+	live_flowtable_devices | sorted_device_set
+}
+
+resolved_flowtable_device_set() {
+	live_flowtable_devices |
+		while IFS= read -r dev; do
+			resolve_flowtable_device "$dev"
+		done |
+		sorted_device_set
+}
+
+(
+	trap 'rmdir "$LOCK"' EXIT INT TERM
+
+	SETTLE_DELAY=2
+	POLL_INTERVAL=2
+	MAX_POLLS=6
+
+	# Only repair after WAN ifup. Earlier LAN-zone ifups can already carry
+	# software-offloaded traffic, and a later reload from those events can
+	# strand upper-device flowtable entries until they expire.
+	# Let netifd finish creating the PPPoE/VLAN lower links first.
+	sleep "$SETTLE_DELAY"
+
+	count=0
+	while [ "$count" -lt "$MAX_POLLS" ]; do
+		live_set="$(live_flowtable_device_set)"
+
+		if [ -n "$live_set" ]; then
+			resolved_set="$(resolved_flowtable_device_set)"
+
+			if [ -n "$resolved_set" ] && [ "$resolved_set" != "$live_set" ]; then
+				logger -t firewall "Late firewall reload after $ACTION of $INTERFACE ($DEVICE) refreshed flowtable device resolution"
+				fw4 -q reload
+				sleep "$POLL_INTERVAL"
+
+				post_live_set="$(live_flowtable_device_set)"
+				post_resolved_set="$(resolved_flowtable_device_set)"
+				if [ -n "$post_live_set" ] &&
+				   [ -n "$post_resolved_set" ] &&
+				   [ "$post_live_set" != "$post_resolved_set" ]; then
+					logger -t firewall "Late firewall reload did not converge flowtable device resolution"
+				fi
+			fi
+
+			touch "$DONE"
+			exit 0
+		fi
+
+		count=$((count + 1))
+		sleep "$POLL_INTERVAL"
+	done
+
+	touch "$DONE"
+) &
