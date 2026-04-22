@@ -11,11 +11,22 @@ mono,gateway-dk-sdboot)
 	;;
 esac
 
+changed=0
+
+case "$(uci -q get firewall.@defaults[0].lower_device_flowtable)" in
+'')
+	uci set firewall.@defaults[0].lower_device_flowtable='1'
+	changed=1
+	;;
+esac
+
 case "$(uci -q get firewall.@defaults[0].lower_device_flowtable_reload)" in
 '')
 	uci set firewall.@defaults[0].lower_device_flowtable_reload='1'
-	uci commit firewall
+	changed=1
 	;;
 esac
+
+[ "$changed" -eq 0 ] || uci commit firewall
 
 exit 0

@@ -1,0 +1,320 @@
+--- a/root/usr/share/ucode/fw4.uc
++++ b/root/usr/share/ucode/fw4.uc
+@@ -509,8 +509,8 @@
+ 		if (!this.default_option("flow_offloading_hw"))
+ 			return null;
+ 
++		let devices = [];
+ 		let devstatus = null;
+-		let devices = null;
+ 		let bus = ubus.connect();
+ 
+ 		if (bus) {
+@@ -520,14 +520,20 @@
+ 
+ 		for (let zone in this.zones())
+ 			for (let device in zone.related_physdevs)
+-				push(devices ||= [], ...resolve_lower_devices(devstatus, device));
++				push(devices, ...resolve_lower_devices(devstatus, device));
+ 
+-		if (!devices)
++		if (!length(devices))
+ 			return null;
+ 
+ 		devices = sort(uniq(devices));
+ 
+-		if (!nft_try_hw_offload(devices)) {
++		/*
++		 * For target-local lower-device policy, keep hardware mode as an
++		 * explicit request and let the kernel/backend decide whether any
++		 * true offload is available.
++		 */
++		if (!this.default_option("lower_device_flowtable") &&
++		    !nft_try_hw_offload(devices)) {
+ 			this.warn('Hardware flow offloading unavailable, falling back to software offloading');
+ 			this.state.defaults.flow_offloading_hw = false;
+ 
+@@ -537,24 +543,41 @@
+ 		return devices;
+ 	},
+ 
++	resolve_sw_offload_devices: function() {
++		let devices = [];
++		let lower_devices = this.default_option("lower_device_flowtable");
++		let devstatus = {};
++		let bus;
++
++		if (lower_devices) {
++			bus = ubus.connect();
++
++			if (bus) {
++				devstatus = bus.call("network.device", "status") || {};
++				bus.disconnect();
++			}
++		}
++
++		for (let zone in this.zones())
++			for (let device in zone.related_physdevs)
++				if (lower_devices)
++					push(devices, ...resolve_lower_devices(devstatus, device));
++				else if (fs.access(`/sys/class/net/${device}`))
++					push(devices, device);
++
++		if (!length(devices))
++			return null;
++
++		return sort(uniq(devices));
++	},
++
+ 	resolve_offload_devices: function() {
+ 		if (!this.default_option("flow_offloading"))
+ 			return [];
+ 
+ 		let devices = this.resolve_hw_offload_devices();
+ 
+-		if (!devices) {
+-			devices = [];
+-
+-			for (let zone in this.zones())
+-				for (let device in zone.related_physdevs)
+-					if (fs.access(`/sys/class/net/${device}`))
+-						push(devices, device);
+-
+-			devices = sort(uniq(devices));
+-		}
+-
+-		return devices;
++		return devices || this.resolve_sw_offload_devices() || [];
+ 	},
+ 
+ 	check_set_types: function() {
+@@ -1970,6 +1993,10 @@
+ 			custom_chains: [ "bool", null, UNSUPPORTED ],
+ 			disable_ipv6: [ "bool", null, UNSUPPORTED ],
+ 			flow_offloading: [ "bool", "0" ],
++			/* Target policy knob for lower-device flowtable hooks. */
++			lower_device_flowtable: [ "bool", "0" ],
++			/* Target-local helper knob, ignored by policy generation. */
++			lower_device_flowtable_reload: [ "bool", "0" ],
+ 			flow_offloading_hw: [ "bool", "0" ],
+ 
+ 			auto_includes: [ "bool", "1" ]
+--- a/root/sbin/fw4
++++ b/root/sbin/fw4
+@@ -16,9 +16,42 @@
+ 	exit 1
+ }
+ 
++print_nft_errors() {
++	[ -n "$QUIET" ] || cat "$1" >&2
++}
++
++render_ruleset() {
++	ACTION=start \
++		utpl -S $MAIN >"$1"
++}
++
++run_includes() {
++	ACTION=includes \
++		utpl -S $MAIN
++}
++
++flowtable_switch_error() {
++	grep -q 'Could not process rule: Resource busy' "$1" &&
++	grep -q 'flowtable ft' "$1"
++}
++
++apply_ruleset_file() {
++	nft $VERBOSE -f "$1" 2>"$2"
++}
++
++check_ruleset_file() {
++	nft $VERBOSE -c -f "$1" 2>"$2"
++}
++
++recreate_ruleset_file() {
++	nft delete table inet fw4 2>/dev/null || true
++	apply_ruleset_file "$1" "$2"
++}
++
+ start() {
+ 	{
+ 		flock -x 1000
++		local rules err rc
+ 
+ 		case "$1" in
+ 			start)
+@@ -32,11 +65,36 @@
+ 			;;
+ 		esac
+ 
+-		ACTION=start \
+-			utpl -S $MAIN | nft $VERBOSE -f $STDIN
++		rules="$(mktemp)" || die "Unable to create temporary ruleset file."
++		err="$(mktemp)" || {
++			rm -f "$rules"
++			die "Unable to create temporary nft error file."
++		}
++
++		if ! render_ruleset "$rules"; then
++			rc=$?
++			rm -f "$rules" "$err"
++			exit "$rc"
++		fi
++
++		if ! apply_ruleset_file "$rules" "$err"; then
++			if [ "$1" = reload ] && flowtable_switch_error "$err"; then
++				: >"$err"
++				recreate_ruleset_file "$rules" "$err" || {
++					print_nft_errors "$err"
++					rm -f "$rules" "$err"
++					exit 1
++				}
++			else
++				print_nft_errors "$err"
++				rm -f "$rules" "$err"
++				exit 1
++			fi
++		fi
+ 
+-		ACTION=includes \
+-			utpl -S $MAIN
++		rm -f "$rules" "$err"
++
++		run_includes
+ 	} 1000>$LOCK
+ }
+ 
+@@ -78,6 +136,42 @@
+ 		flock -x $LOCK utpl -S $MAIN
+ }
+ 
++restart() {
++	{
++		flock -x 1000
++		local rules err rc
++
++		rules="$(mktemp)" || die "Unable to create temporary ruleset file."
++		err="$(mktemp)" || {
++			rm -f "$rules"
++			die "Unable to create temporary nft error file."
++		}
++
++		if ! render_ruleset "$rules"; then
++			rc=$?
++			rm -f "$rules" "$err"
++			exit "$rc"
++		fi
++
++		if ! check_ruleset_file "$rules" "$err" &&
++		   ! flowtable_switch_error "$err"; then
++			print_nft_errors "$err"
++			rm -f "$rules" "$err"
++			die "The rendered ruleset contains errors, not doing firewall restart."
++		fi
++
++		: >"$err"
++		recreate_ruleset_file "$rules" "$err" || {
++			print_nft_errors "$err"
++			rm -f "$rules" "$err"
++			die "The rendered ruleset contains errors, not doing firewall restart."
++		}
++
++		rm -f "$rules" "$err"
++		run_includes
++	} 1000>$LOCK
++}
++
+ while [ -n "$1" ]; do
+ 	case "$1" in
+ 		-q)
+@@ -105,9 +199,7 @@
+ 		flush
+ 	;;
+ 	restart)
+-		QUIET=1 print | nft ${VERBOSE} -c -f $STDIN || die "The rendered ruleset contains errors, not doing firewall restart."
+-		stop || rm -f $STATE
+-		start
++		restart
+ 	;;
+ 	check)
+ 		if [ -n "$QUIET" ]; then
+--- /dev/null
++++ b/tests/01_configuration/03_lower_devices
+@@ -0,0 +1,76 @@
++Verifies that an explicit lower-device flowtable policy also applies to
++software flow offloading.
++
++-- File uci/firewall.json --
++{
++	"defaults": {
++		"flow_offloading": "1",
++		"flow_offloading_hw": "0",
++		"lower_device_flowtable": "1"
++	},
++	"zone": [
++		{
++			"name": "mz",
++			"input": "ACCEPT",
++			"output": "ACCEPT",
++			"forward": "ACCEPT",
++			"network": [ "mz" ]
++		},
++		{
++			"name": "iot",
++			"input": "ACCEPT",
++			"output": "ACCEPT",
++			"forward": "ACCEPT",
++			"network": [ "iot" ]
++		},
++		{
++			"name": "wan",
++			"input": "REJECT",
++			"output": "ACCEPT",
++			"forward": "REJECT",
++			"network": [ "wan", "wanraw" ]
++		}
++	]
++}
++-- End --
++
++-- File ubus/network.interface~dump.json --
++{
++	"interface": [
++		{ "interface": "mz", "up": true, "l3_device": "br-mz", "device": "br-mz", "proto": "static", "data": {} },
++		{ "interface": "iot", "up": true, "l3_device": "eth1.18", "device": "eth1.18", "proto": "static", "data": {} },
++		{ "interface": "wan", "up": true, "l3_device": "pppoe-wan", "device": "pppoe-wan", "proto": "pppoe", "data": {} },
++		{ "interface": "wanraw", "up": true, "l3_device": "eth0.10", "device": "eth0.10", "proto": "static", "data": {} }
++	]
++}
++-- End --
++
++-- File ubus/network.device~status.json --
++{
++	"br-mz": { "devtype": "bridge" },
++	"eth0.10": { "devtype": "vlan" },
++	"eth1.18": { "devtype": "vlan" },
++	"pppoe-wan": { "devtype": "pppoe" }
++}
++-- End --
++
++-- File fs/opendir~_sys_class_net_br-mz.json --
++[ "lower_eth1", "lower_eth2" ]
++-- End --
++-- File fs/opendir~_sys_class_net_eth1_18.json --
++[ "lower_eth1" ]
++-- End --
++-- File fs/opendir~_sys_class_net_eth0_10.json --
++[ "lower_eth0" ]
++-- End --
++-- File fs/opendir~_sys_class_net_pppoe-wan.json --
++[]
++-- End --
++
++-- Testcase --
++{% let fw4 = require("fw4"); fw4.load(false); print(fw4.resolve_offload_devices()) %}
++-- End --
++
++-- Expect stdout --
++[ "eth0", "eth1", "eth2", "pppoe-wan" ]
++-- End --

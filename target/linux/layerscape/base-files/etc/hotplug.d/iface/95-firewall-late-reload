@@ -16,6 +16,9 @@ case "$(uci -q get firewall.@defaults[0].flow_offloading)" in
 	;;
 esac
 
+# Lower-device convergence matters for both the current driver-managed
+# software fast path and later true hardware mode. Keep this keyed to
+# flow_offloading itself rather than flow_offloading_hw.
 # Keep lower-device flowtable correction explicitly gated. The Mono Gateway
 # target seeds this from UCI defaults, but the guard remains a policy choice,
 # not datapath architecture.
