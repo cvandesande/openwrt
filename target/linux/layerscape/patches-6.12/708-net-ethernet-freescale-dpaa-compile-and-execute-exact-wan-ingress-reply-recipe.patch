@@ -1,0 +1,918 @@
+From: OpenAI Codex <codex@openai.com>
+Subject: [PATCH] net: ethernet: freescale: dpaa: consolidate exact symmetric shaped flow handling
+
+Consolidate the post-706 functional DPAA flowtable work into one
+reviewable patch while removing the diagnostic-only follow-ons from
+the active series.
+
+This patch keeps the current boundary exact and local to the DPAA
+driver executor:
+
+- compile and execute the exact WAN-ingress reply contract
+- normalize mirrored reverse encap when the stock reply rule carries
+  the same exact WAN shape in its action list
+- recover the missing reply VLAN match from mirrored encap or from
+  the exact lower-WAN topology when stock flowtable omits it
+- lower explicit VLAN uppers such as eth1.18 into the current lower
+  DPAA device plus one exact ingress VLAN match
+- recover one exact shared-lower forward VLAN match only when the
+  lower-device handoff plus topology and source subnet make that VLAN
+  unambiguous
+
+Keep explicit fallback for anything broader. True FMAN-resident
+forwarding remains later work behind the 707 seam.
+
+---
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c	2026-04-22 00:56:12.631611705 +0100
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.c	2026-04-22 00:57:55.630680232 +0100
+@@ -15,6 +15,7 @@
+ #include <linux/if_arp.h>
+ #include <linux/if_pppox.h>
+ #include <linux/if_vlan.h>
++#include <linux/inetdevice.h>
+ #include <linux/icmp.h>
+ #include <linux/ip.h>
+ #include <linux/ipv6.h>
+@@ -452,6 +453,21 @@
+ 	return a->v4.src == b->v4.src && a->v4.dst == b->v4.dst;
+ }
+ 
++struct dpaa_ft_parse_info {
++	unsigned int ip_off;
++	unsigned int l4_off;
++	unsigned int decap_len;
++	struct {
++		bool present;
++		u16 vid;
++		__be16 proto;
++	} vlan;
++	struct {
++		bool present;
++		__be16 ppp_proto;
++	} pppoe;
++};
++
+ static struct dpaa_ft_entry *dpaa_ft_lookup_locked(struct dpaa_priv *priv,
+ 						   unsigned long cookie)
+ {
+@@ -647,6 +663,33 @@
+ 	return 0;
+ }
+ 
++static int dpaa_ft_compile_vlan_match(struct dpaa_ft_entry *entry,
++				      const struct flow_rule *rule)
++{
++	struct flow_match_vlan match;
++
++	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_VLAN))
++		return 0;
++
++	if (entry->ingress.vlan_match.present)
++		return -EEXIST;
++
++	flow_rule_match_vlan(rule, &match);
++
++	if (match.mask->vlan_id != VLAN_VID_MASK ||
++	    match.mask->vlan_dei != 0 ||
++	    match.mask->vlan_priority != 0 ||
++	    match.mask->vlan_tpid != htons(0xffff) ||
++	    match.key->vlan_tpid != htons(ETH_P_8021Q))
++		return -EOPNOTSUPP;
++
++	entry->ingress.vlan_match.present = true;
++	entry->ingress.vlan_match.vid = match.key->vlan_id;
++	entry->ingress.vlan_match.proto = match.key->vlan_tpid;
++
++	return 0;
++}
++
+ static int dpaa_ft_compile_vlan_push(struct dpaa_ft_egress_recipe *egress,
+ 				     const struct flow_action_entry *act)
+ {
+@@ -735,6 +778,438 @@
+ 	return htons(entry->tuple.is_ipv6 ? PPP_IPV6 : PPP_IP);
+ }
+ 
++static bool dpaa_ft_ingress_recipe_needs_decap(const struct dpaa_ft_entry *entry)
++{
++	return entry->ingress.vlan_pop || entry->ingress.pppoe_decap;
++}
++
++static bool
++dpaa_ft_ingress_recipe_has_plain_vlan_match(const struct dpaa_ft_entry *entry)
++{
++	return entry->ingress.vlan_match.present &&
++	       !dpaa_ft_ingress_recipe_needs_decap(entry);
++}
++
++static bool
++dpaa_ft_ingress_reply_can_normalize_mirrored_encap(const struct dpaa_ft_entry *entry)
++{
++	const struct dpaa_ft_ingress_recipe *ingress = &entry->ingress;
++	const struct dpaa_ft_egress_recipe *egress = &entry->egress;
++
++	if (!dpaa_ft_ingress_recipe_needs_decap(entry))
++		return false;
++
++	if (!ingress->vlan_pop)
++		return false;
++
++	if (!egress->vlan_push.present || !egress->pppoe_push.present)
++		return false;
++
++	if (egress->vlan_push.proto != htons(ETH_P_8021Q))
++		return false;
++
++	if (egress->pppoe_push.sid == 0)
++		return false;
++
++	if (!egress->out_dev || egress->out_dev->type != ARPHRD_ETHER)
++		return false;
++
++	if (entry->tuple.is_ipv6)
++		return false;
++
++	if (egress->nat.type != DPAA_FT_NAT_DNAT || !egress->nat.addr_valid)
++		return false;
++
++	if (ingress->vlan_match.present &&
++	    (egress->vlan_push.proto != ingress->vlan_match.proto ||
++	     egress->vlan_push.vid != ingress->vlan_match.vid))
++		return false;
++
++	return true;
++}
++
++static void
++dpaa_ft_ingress_reply_normalize_mirrored_encap(struct dpaa_ft_entry *entry)
++{
++	if (!entry->ingress.vlan_match.present) {
++		entry->ingress.vlan_match.present = true;
++		entry->ingress.vlan_match.vid = entry->egress.vlan_push.vid;
++		entry->ingress.vlan_match.proto = entry->egress.vlan_push.proto;
++	}
++
++	entry->egress.vlan_push.present = false;
++	entry->egress.vlan_push.vid = 0;
++	entry->egress.vlan_push.proto = 0;
++	entry->egress.vlan_push.prio = 0;
++	entry->egress.pppoe_push.present = false;
++	entry->egress.pppoe_push.sid = 0;
++}
++
++static int
++dpaa_ft_lower_exact_vlan_upper_ingress(struct dpaa_priv *priv,
++				       struct flow_cls_offload *cls,
++				       struct dpaa_ft_entry *entry)
++{
++	const struct dpaa_ft_egress_recipe *egress = &entry->egress;
++	struct net_device *ingress_dev;
++	u16 vid;
++	__be16 proto;
++
++	if (dpaa_ft_ingress_recipe_needs_decap(entry))
++		return 0;
++
++	if (!dpaa_ft_egress_recipe_needs_encap(egress))
++		return 0;
++
++	if (entry->tuple.ingress_ifindex == priv->net_dev->ifindex)
++		return 0;
++
++	ingress_dev = dev_get_by_index(dev_net(priv->net_dev),
++				       entry->tuple.ingress_ifindex);
++	if (!ingress_dev)
++		return 0;
++
++	if (!is_vlan_dev(ingress_dev) ||
++	    vlan_dev_real_dev(ingress_dev) != priv->net_dev)
++		goto out_put;
++
++	proto = vlan_dev_vlan_proto(ingress_dev);
++	if (proto != htons(ETH_P_8021Q)) {
++		dev_put(ingress_dev);
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_MATCH,
++					     -EOPNOTSUPP,
++					     "Only 802.1Q VLAN upper ingress can be lowered");
++	}
++
++	vid = vlan_dev_vlan_id(ingress_dev);
++	if (entry->ingress.vlan_match.present &&
++	    (entry->ingress.vlan_match.proto != proto ||
++	     entry->ingress.vlan_match.vid != vid)) {
++		dev_put(ingress_dev);
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_MATCH,
++					     -EOPNOTSUPP,
++					     "Ingress VLAN upper and exact VLAN match disagree");
++	}
++
++	entry->tuple.ingress_ifindex = priv->net_dev->ifindex;
++	entry->ingress.vlan_match.present = true;
++	entry->ingress.vlan_match.vid = vid;
++	entry->ingress.vlan_match.proto = proto;
++
++out_put:
++	dev_put(ingress_dev);
++
++	return 0;
++}
++
++static bool
++dpaa_ft_ingress_reply_recover_topology_vlan_match(struct dpaa_priv *priv,
++						  struct dpaa_ft_entry *entry)
++{
++	const struct dpaa_ft_ingress_recipe *ingress = &entry->ingress;
++	const struct dpaa_ft_egress_recipe *egress = &entry->egress;
++	struct net_device *lower_dev, *upper_dev;
++	struct list_head *iter;
++	u16 recovered_vid = 0;
++	__be16 recovered_proto = 0;
++	bool found = false;
++	bool ambiguous = false;
++
++	if (!dpaa_ft_ingress_recipe_needs_decap(entry))
++		return false;
++
++	if (ingress->vlan_match.present || !ingress->vlan_pop)
++		return false;
++
++	if (egress->vlan_push.present || egress->pppoe_push.present)
++		return false;
++
++	if (!egress->out_dev || egress->out_dev->type != ARPHRD_ETHER)
++		return false;
++
++	if (entry->tuple.is_ipv6)
++		return false;
++
++	if (egress->nat.type != DPAA_FT_NAT_DNAT || !egress->nat.addr_valid)
++		return false;
++
++	lower_dev = dev_get_by_index(dev_net(priv->net_dev),
++				     entry->tuple.ingress_ifindex);
++	if (!lower_dev)
++		return false;
++
++	if (lower_dev->type != ARPHRD_ETHER)
++		goto out_put;
++
++	/* Keep shared-lower handling deferred by requiring one VLAN upper. */
++	rcu_read_lock();
++	netdev_for_each_upper_dev_rcu(lower_dev, upper_dev, iter) {
++		if (!is_vlan_dev(upper_dev))
++			continue;
++
++		if (vlan_dev_vlan_proto(upper_dev) != htons(ETH_P_8021Q))
++			continue;
++
++		if (found) {
++			ambiguous = true;
++			break;
++		}
++
++		found = true;
++		recovered_vid = vlan_dev_vlan_id(upper_dev);
++		recovered_proto = vlan_dev_vlan_proto(upper_dev);
++	}
++	rcu_read_unlock();
++
++	if (!found || ambiguous)
++		goto out_put;
++
++	entry->ingress.vlan_match.present = true;
++	entry->ingress.vlan_match.vid = recovered_vid;
++	entry->ingress.vlan_match.proto = recovered_proto;
++	dev_put(lower_dev);
++
++	return true;
++
++out_put:
++	dev_put(lower_dev);
++
++	return false;
++}
++
++static bool
++dpaa_ft_vlan_upper_matches_source_ipv4_rcu(struct net_device *upper_dev,
++					   __be32 src_addr)
++{
++	const struct in_ifaddr *ifa;
++	struct in_device *in_dev;
++
++	if (!src_addr)
++		return false;
++
++	in_dev = __in_dev_get_rcu(upper_dev);
++	if (!in_dev)
++		return false;
++
++	in_dev_for_each_ifa_rcu(ifa, in_dev) {
++		if (inet_ifa_match(src_addr, ifa))
++			return true;
++	}
++
++	return false;
++}
++
++static bool
++dpaa_ft_forward_recover_shared_lower_vlan_match(struct dpaa_priv *priv,
++						struct dpaa_ft_entry *entry)
++{
++	const struct dpaa_ft_ingress_recipe *ingress = &entry->ingress;
++	struct net_device *lower_dev, *upper_dev;
++	struct list_head *iter;
++	u16 recovered_vid = 0;
++	__be16 recovered_proto = 0;
++	bool found = false;
++	bool ambiguous = false;
++	__be32 src_addr;
++
++	if (!dpaa_ft_ingress_recipe_needs_decap(entry))
++		return false;
++
++	if (ingress->vlan_match.present || !ingress->vlan_pop ||
++	    ingress->pppoe_decap)
++		return false;
++
++	if (entry->tuple.is_ipv6)
++		return false;
++
++	if (entry->tuple.ingress_ifindex != priv->net_dev->ifindex)
++		return false;
++
++	if (!dpaa_ft_egress_recipe_supports_outbound_encap(entry))
++		return false;
++
++	if (entry->egress.nat.type != DPAA_FT_NAT_SNAT ||
++	    !entry->egress.nat.addr_valid)
++		return false;
++
++	src_addr = entry->tuple.v4.src;
++	if (!src_addr)
++		return false;
++
++	lower_dev = dev_get_by_index(dev_net(priv->net_dev),
++				     entry->tuple.ingress_ifindex);
++	if (!lower_dev)
++		return false;
++
++	if (lower_dev->type != ARPHRD_ETHER)
++		goto out_put;
++
++	/*
++	 * For shared-lower trunk ports, only recover an exact VLAN when one
++	 * immediate 802.1Q upper on this lower owns the flow's IPv4 source
++	 * subnet. Any ambiguity still falls back.
++	 */
++	rcu_read_lock();
++	netdev_for_each_upper_dev_rcu(lower_dev, upper_dev, iter) {
++		if (!is_vlan_dev(upper_dev))
++			continue;
++
++		if (vlan_dev_real_dev(upper_dev) != lower_dev)
++			continue;
++
++		if (vlan_dev_vlan_proto(upper_dev) != htons(ETH_P_8021Q))
++			continue;
++
++		if (!dpaa_ft_vlan_upper_matches_source_ipv4_rcu(upper_dev,
++								src_addr))
++			continue;
++
++		if (found) {
++			ambiguous = true;
++			break;
++		}
++
++		found = true;
++		recovered_vid = vlan_dev_vlan_id(upper_dev);
++		recovered_proto = vlan_dev_vlan_proto(upper_dev);
++	}
++	rcu_read_unlock();
++
++	if (!found || ambiguous)
++		goto out_put;
++
++	entry->ingress.vlan_match.present = true;
++	entry->ingress.vlan_match.vid = recovered_vid;
++	entry->ingress.vlan_match.proto = recovered_proto;
++	entry->ingress.vlan_pop = false;
++	entry->ingress.pppoe_decap = false;
++	entry->ingress.ppp_proto = 0;
++	dev_put(lower_dev);
++
++	return true;
++
++out_put:
++	dev_put(lower_dev);
++
++	return false;
++}
++
++static const char *
++dpaa_ft_ingress_reply_decap_error(const struct dpaa_ft_entry *entry)
++{
++	const struct dpaa_ft_ingress_recipe *ingress = &entry->ingress;
++
++	if (!dpaa_ft_ingress_recipe_needs_decap(entry))
++		return "Reply decap validation ran without ingress decap";
++
++	if (entry->tuple.is_ipv6)
++		return "Reply decap requires IPv4 flow";
++
++	if (!ingress->vlan_match.present)
++		return "Reply decap requires one exact 802.1Q VLAN match";
++
++	if (!ingress->vlan_pop)
++		return "Reply decap requires one VLAN pop action";
++
++	if (ingress->vlan_match.proto != htons(ETH_P_8021Q))
++		return "Reply decap only supports 802.1Q outer VLAN";
++
++	if (entry->egress.vlan_push.present || entry->egress.pppoe_push.present)
++		return "Reply decap cannot also push VLAN or PPPoE";
++
++	if (!entry->egress.out_dev || entry->egress.out_dev->type != ARPHRD_ETHER)
++		return "Reply decap requires Ethernet egress redirect";
++
++	if (entry->egress.nat.type != DPAA_FT_NAT_DNAT ||
++	    !entry->egress.nat.addr_valid)
++		return "Reply decap requires IPv4 DNAT with translated address";
++
++	return NULL;
++}
++
++static int dpaa_ft_validate_recipe(struct dpaa_priv *priv,
++				   struct flow_cls_offload *cls,
++				   struct dpaa_ft_entry *entry)
++{
++	bool ingress_decap = dpaa_ft_ingress_recipe_needs_decap(entry);
++	bool egress_encap;
++	const char *reply_decap_error;
++	int err;
++
++	/*
++	 * When stock flowtable keeps ingress identity on an explicit VLAN
++	 * upper such as eth1.18, lower that exact upper to the current DPAA
++	 * port plus one exact 802.1Q ingress match for the shaped outbound
++	 * WAN contract.
++	 */
++	err = dpaa_ft_lower_exact_vlan_upper_ingress(priv, cls, entry);
++	if (err)
++		return err;
++
++	/*
++	 * Stock flowtable can also collapse a shared-lower VLAN ingress to the
++	 * lower device while still expressing ingress VLAN pop plus exact WAN
++	 * encap. Recover the exact 802.1Q ingress match only when one VLAN
++	 * upper on this lower uniquely owns the flow's IPv4 source subnet.
++	 */
++	dpaa_ft_forward_recover_shared_lower_vlan_match(priv, entry);
++
++	ingress_decap = dpaa_ft_ingress_recipe_needs_decap(entry);
++
++	/*
++	 * Stock flowtable can omit the explicit ingress VLAN match and mirror
++	 * the WAN encapsulation back into the reverse rule action list. For
++	 * the exact reply-half contract we recover the missing 802.1Q match
++	 * from the mirrored VLAN push, then normalize to pure decap plus
++	 * plain LAN egress.
++	 */
++	if (ingress_decap &&
++	    dpaa_ft_ingress_reply_can_normalize_mirrored_encap(entry))
++		dpaa_ft_ingress_reply_normalize_mirrored_encap(entry);
++
++	/*
++	 * Stock flowtable can also present the exact WAN reply shape as pure
++	 * decap plus LAN redirect on the lower WAN device. Recover the
++	 * missing VLAN match only when that lower-device topology exposes
++	 * exactly one immediate 802.1Q upper.
++	 */
++	if (ingress_decap && !entry->ingress.vlan_match.present)
++		dpaa_ft_ingress_reply_recover_topology_vlan_match(priv, entry);
++
++	egress_encap = dpaa_ft_egress_recipe_needs_encap(&entry->egress);
++
++	if (ingress_decap && egress_encap)
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_ACTION,
++					     -EOPNOTSUPP,
++					     "Mixed ingress decap and egress encap are not supported");
++
++	if (ingress_decap) {
++		reply_decap_error = dpaa_ft_ingress_reply_decap_error(entry);
++		if (reply_decap_error)
++			return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_ACTION,
++					     -EOPNOTSUPP,
++					     reply_decap_error);
++
++		entry->ingress.pppoe_decap = true;
++		entry->ingress.ppp_proto = dpaa_ft_egress_ppp_proto(entry);
++	}
++
++	if (egress_encap && !dpaa_ft_egress_recipe_supports_outbound_encap(entry))
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_ACTION,
++					     -EOPNOTSUPP,
++					     "Only exact IPv4 SNAT with one 802.1Q VLAN push and one PPPoE push is supported");
++
++	entry->stats.used_hw_stats = FLOW_ACTION_HW_STATS_DELAYED;
++	entry->stats.used_hw_stats_valid = true;
++
++	return 0;
++}
++
+ static void dpaa_ft_build_egress_encap(struct sk_buff *skb,
+ 				       const struct dpaa_ft_entry *entry,
+ 				       unsigned int *l4_off)
+@@ -798,6 +1275,7 @@
+ 				 struct dpaa_ft_entry *entry)
+ {
+ 	struct flow_rule *rule = flow_cls_offload_flow_rule(cls);
++	int err;
+ 
+ 	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_META))
+ 		return dpaa_ft_reject_locked(priv, cls,
+@@ -813,8 +1291,7 @@
+ 					     -EOPNOTSUPP,
+ 					     "Missing stock flowtable match keys");
+ 
+-	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_VLAN) ||
+-	    flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_CVLAN) ||
++	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_CVLAN) ||
+ 	    flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PPPOE) ||
+ 	    flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_CONTROL) ||
+ 	    flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_KEYID) ||
+@@ -833,6 +1310,15 @@
+ 		entry->tuple.ingress_ifindex = match.key->ingress_ifindex;
+ 	}
+ 
++	err = dpaa_ft_compile_vlan_match(entry, rule);
++	if (err)
++		return dpaa_ft_reject_locked(priv, cls,
++					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_MATCH,
++					     err,
++					     err == -EEXIST ?
++					     "Only one VLAN match can be compiled" :
++					     "Only exact 802.1Q VLAN match is supported");
++
+ 	{
+ 		struct flow_match_control match;
+ 
+@@ -999,10 +1485,13 @@
+ 			have_redirect = true;
+ 			break;
+ 		case FLOW_ACTION_VLAN_POP:
+-			return dpaa_ft_reject_locked(priv, cls,
++			if (entry->ingress.vlan_pop)
++				return dpaa_ft_reject_locked(priv, cls,
+ 					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_ACTION,
+-					     -EOPNOTSUPP,
+-					     "Ingress VLAN pop is not supported");
++					     -EEXIST,
++					     "Only one VLAN pop can be compiled");
++			entry->ingress.vlan_pop = true;
++			break;
+ 		case FLOW_ACTION_VLAN_PUSH:
+ 			err = dpaa_ft_compile_vlan_push(&entry->egress, act);
+ 			if (err)
+@@ -1064,20 +1553,7 @@
+ 					     "Checksum action without NAT is not supported");
+ 	}
+ 
+-	/*
+-	 * Compile the shaped egress recipe now so the next execution patch can
+-	 * consume it without widening the plain flowtable compiler again.
+-	 * Keep rejecting VLAN and PPPoE execution until that executor exists.
+-	 */
+-	if (!dpaa_ft_egress_recipe_supports_outbound_encap(entry))
+-		return dpaa_ft_reject_locked(priv, cls,
+-					     DPAA_FT_REJECT_UNSUPPORTED_ENCAP_ACTION,
+-					     -EOPNOTSUPP,
+-					     "Only exact IPv4 SNAT with one 802.1Q VLAN push and one PPPoE push is supported");
+-	entry->stats.used_hw_stats = FLOW_ACTION_HW_STATS_DELAYED;
+-	entry->stats.used_hw_stats_valid = true;
+-
+-	return 0;
++	return dpaa_ft_validate_recipe(priv, cls, entry);
+ }
+ 
+ static int dpaa_ft_compile_flow(struct dpaa_priv *priv,
+@@ -1174,15 +1650,19 @@
+ 
+ static int dpaa_ft_parse_packet(struct sk_buff *skb, int ingress_ifindex,
+ 				struct dpaa_ft_tuple *tuple,
+-				unsigned int *l4_off)
++				struct dpaa_ft_parse_info *parse)
+ {
++	const struct pppoe_hdr *phdr;
+ 	const struct ipv6hdr *ip6h;
+ 	const struct tcphdr *tcph;
+ 	const struct ethhdr *eth;
+ 	const struct udphdr *udph;
+ 	const struct iphdr *iph;
++	const struct vlan_hdr *vhdr;
++	__be16 proto;
+ 
+ 	memset(tuple, 0, sizeof(*tuple));
++	memset(parse, 0, sizeof(*parse));
+ 	tuple->ingress_ifindex = ingress_ifindex;
+ 
+ 	if (!pskb_may_pull(skb, ETH_HLEN))
+@@ -1190,20 +1670,53 @@
+ 
+ 	skb_reset_mac_header(skb);
+ 	eth = eth_hdr(skb);
++	proto = eth->h_proto;
++	parse->ip_off = ETH_HLEN;
+ 
+ 	if (skb_vlan_tag_present(skb))
+ 		return -ENOENT;
+ 
+-	switch (eth->h_proto) {
+-	case htons(ETH_P_8021Q):
+-	case htons(ETH_P_8021AD):
+-	case htons(ETH_P_PPP_SES):
+-		return -ENOENT;
++	if (proto == htons(ETH_P_8021Q) || proto == htons(ETH_P_8021AD)) {
++		if (!pskb_may_pull(skb, ETH_HLEN + VLAN_HLEN))
++			return -ENOENT;
++
++		vhdr = (struct vlan_hdr *)(skb->data + ETH_HLEN);
++		parse->vlan.present = true;
++		parse->vlan.vid = ntohs(vhdr->h_vlan_TCI) & VLAN_VID_MASK;
++		parse->vlan.proto = proto;
++		parse->ip_off += VLAN_HLEN;
++		parse->decap_len += VLAN_HLEN;
++		proto = vhdr->h_vlan_encapsulated_proto;
++	}
++
++	if (proto == htons(ETH_P_PPP_SES)) {
++		if (!pskb_may_pull(skb, parse->ip_off + PPPOE_SES_HLEN))
++			return -ENOENT;
++
++		phdr = (struct pppoe_hdr *)(skb->data + parse->ip_off);
++		parse->pppoe.present = true;
++		parse->pppoe.ppp_proto = *(__be16 *)(phdr + 1);
++		parse->ip_off += PPPOE_SES_HLEN;
++		parse->decap_len += PPPOE_SES_HLEN;
++
++		switch (parse->pppoe.ppp_proto) {
++		case htons(PPP_IP):
++			proto = htons(ETH_P_IP);
++			break;
++		case htons(PPP_IPV6):
++			proto = htons(ETH_P_IPV6);
++			break;
++		default:
++			return -ENOENT;
++		}
++	}
++
++	switch (proto) {
+ 	case htons(ETH_P_IP):
+-		if (!pskb_may_pull(skb, ETH_HLEN + sizeof(*iph)))
++		if (!pskb_may_pull(skb, parse->ip_off + sizeof(*iph)))
+ 			return -ENOENT;
+ 
+-		iph = (struct iphdr *)(skb->data + ETH_HLEN);
++		iph = (struct iphdr *)(skb->data + parse->ip_off);
+ 		if (iph->ihl < sizeof(*iph) / 4)
+ 			return -ENOENT;
+ 		if (iph->protocol != IPPROTO_TCP &&
+@@ -1214,17 +1727,17 @@
+ 		tuple->ip_proto = iph->protocol;
+ 		tuple->v4.src = iph->saddr;
+ 		tuple->v4.dst = iph->daddr;
+-		*l4_off = ETH_HLEN + iph->ihl * 4;
+-		if (!pskb_may_pull(skb, *l4_off +
++		parse->l4_off = parse->ip_off + iph->ihl * 4;
++		if (!pskb_may_pull(skb, parse->l4_off +
+ 				   (tuple->ip_proto == IPPROTO_TCP ?
+ 				    sizeof(*tcph) : sizeof(*udph))))
+ 			return -ENOENT;
+ 		break;
+ 	case htons(ETH_P_IPV6):
+-		if (!pskb_may_pull(skb, ETH_HLEN + sizeof(*ip6h)))
++		if (!pskb_may_pull(skb, parse->ip_off + sizeof(*ip6h)))
+ 			return -ENOENT;
+ 
+-		ip6h = (struct ipv6hdr *)(skb->data + ETH_HLEN);
++		ip6h = (struct ipv6hdr *)(skb->data + parse->ip_off);
+ 		if (ip6h->nexthdr != IPPROTO_TCP &&
+ 		    ip6h->nexthdr != IPPROTO_UDP)
+ 			return -ENOENT;
+@@ -1234,8 +1747,8 @@
+ 		tuple->is_ipv6 = true;
+ 		tuple->v6.src = ip6h->saddr;
+ 		tuple->v6.dst = ip6h->daddr;
+-		*l4_off = ETH_HLEN + sizeof(*ip6h);
+-		if (!pskb_may_pull(skb, *l4_off +
++		parse->l4_off = parse->ip_off + sizeof(*ip6h);
++		if (!pskb_may_pull(skb, parse->l4_off +
+ 				   (tuple->ip_proto == IPPROTO_TCP ?
+ 				    sizeof(*tcph) : sizeof(*udph))))
+ 			return -ENOENT;
+@@ -1245,11 +1758,11 @@
+ 	}
+ 
+ 	if (tuple->ip_proto == IPPROTO_TCP) {
+-		tcph = (struct tcphdr *)(skb->data + *l4_off);
++		tcph = (struct tcphdr *)(skb->data + parse->l4_off);
+ 		tuple->src_port = tcph->source;
+ 		tuple->dst_port = tcph->dest;
+ 	} else {
+-		udph = (struct udphdr *)(skb->data + *l4_off);
++		udph = (struct udphdr *)(skb->data + parse->l4_off);
+ 		tuple->src_port = udph->source;
+ 		tuple->dst_port = udph->dest;
+ 	}
+@@ -1257,14 +1770,70 @@
+ 	return 0;
+ }
+ 
++static bool dpaa_ft_packet_matches_ingress(const struct dpaa_ft_entry *entry,
++					   const struct dpaa_ft_parse_info *parse)
++{
++	const struct dpaa_ft_ingress_recipe *ingress = &entry->ingress;
++
++	if (dpaa_ft_ingress_recipe_has_plain_vlan_match(entry)) {
++		if (parse->pppoe.present || !parse->vlan.present)
++			return false;
++
++		return parse->vlan.proto == ingress->vlan_match.proto &&
++		       parse->vlan.vid == ingress->vlan_match.vid;
++	}
++
++	if (!dpaa_ft_ingress_recipe_needs_decap(entry))
++		return !parse->vlan.present && !parse->pppoe.present;
++
++	if (!ingress->vlan_match.present || !ingress->vlan_pop ||
++	    !ingress->pppoe_decap)
++		return false;
++
++	if (!parse->vlan.present || !parse->pppoe.present)
++		return false;
++
++	if (parse->vlan.proto != ingress->vlan_match.proto ||
++	    parse->vlan.vid != ingress->vlan_match.vid)
++		return false;
++
++	return parse->pppoe.ppp_proto == ingress->ppp_proto;
++}
++
++static void dpaa_ft_strip_ingress_encap(struct sk_buff *skb,
++					unsigned int decap_len,
++					unsigned int *l4_off)
++{
++	unsigned int network_len;
++
++	if (!decap_len) {
++		skb_reset_mac_header(skb);
++		skb_set_network_header(skb, ETH_HLEN);
++		skb_set_transport_header(skb, *l4_off);
++		skb->mac_len = ETH_HLEN;
++		return;
++	}
++
++	network_len = skb->len - ETH_HLEN - decap_len;
++	memmove(skb->data + ETH_HLEN, skb->data + ETH_HLEN + decap_len,
++		network_len);
++	skb_trim(skb, skb->len - decap_len);
++	*l4_off -= decap_len;
++
++	skb_reset_mac_header(skb);
++	skb_set_network_header(skb, ETH_HLEN);
++	skb_set_transport_header(skb, *l4_off);
++	skb->mac_len = ETH_HLEN;
++}
++
+ static bool dpaa_ft_skb_supported(const struct dpaa_ft_entry *entry,
+ 				  const struct sk_buff *skb,
+-				  unsigned int l4_off)
++				  const struct dpaa_ft_parse_info *parse)
+ {
+ 	if (entry->tuple.ip_proto == IPPROTO_TCP) {
+ 		const struct tcphdr *tcph;
+ 
+-		tcph = (const struct tcphdr *)(skb->data + l4_off);
++		tcph = (const struct tcphdr *)(skb->data + parse->l4_off);
+ 		if (tcph->fin || tcph->rst)
+ 			return false;
+ 	}
+@@ -1272,18 +1841,19 @@
+ 	if (entry->tuple.is_ipv6) {
+ 		const struct ipv6hdr *ip6h;
+ 
+-		if (l4_off != ETH_HLEN + sizeof(*ip6h))
++		if (parse->l4_off != parse->ip_off + sizeof(*ip6h))
+ 			return false;
+ 
+-		ip6h = (const struct ipv6hdr *)(skb->data + ETH_HLEN);
++		ip6h = (const struct ipv6hdr *)(skb->data + parse->ip_off);
+ 		return ip6h->hop_limit > 1;
+ 	}
+ 
+ 	{
+ 		const struct iphdr *iph;
+ 
+-		iph = (const struct iphdr *)(skb->data + ETH_HLEN);
+-		if (iph->ihl != sizeof(*iph) / 4 || ip_is_fragment(iph))
++		iph = (const struct iphdr *)(skb->data + parse->ip_off);
++		if (parse->l4_off != parse->ip_off + iph->ihl * 4 ||
++		    iph->ihl != sizeof(*iph) / 4 || ip_is_fragment(iph))
+ 			return false;
+ 
+ 		return iph->ttl > 1;
+@@ -1339,8 +1909,8 @@
+ 				struct sk_buff *skb)
+ {
+ 	struct dpaa_ft_tuple tuple;
++	struct dpaa_ft_parse_info parse;
+ 	struct dpaa_ft_entry *entry;
+-	unsigned int l4_off;
+ 	unsigned int headroom;
+ 	struct sk_buff *fwd_skb;
+ 	struct ethhdr *eth;
+@@ -1350,7 +1920,7 @@
+ 	if (!READ_ONCE(priv->ft.active))
+ 		return false;
+ 
+-	err = dpaa_ft_parse_packet(skb, priv->net_dev->ifindex, &tuple, &l4_off);
++	err = dpaa_ft_parse_packet(skb, priv->net_dev->ifindex, &tuple, &parse);
+ 	if (err)
+ 		return false;
+ 
+@@ -1363,7 +1933,8 @@
+ 		return false;
+ 	}
+ 
+-	if (!dpaa_ft_skb_supported(entry, skb, l4_off)) {
++	if (!dpaa_ft_packet_matches_ingress(entry, &parse) ||
++	    !dpaa_ft_skb_supported(entry, skb, &parse)) {
+ 		dpaa_ft_count_fallback(priv, DPAA_FT_FALLBACK_PACKET);
+ 		rcu_read_unlock();
+ 		return false;
+@@ -1386,7 +1957,8 @@
+ 				 dev_net(priv->net_dev)));
+ 	skb_orphan(fwd_skb);
+ 	skb_set_queue_mapping(fwd_skb, 0);
+-	dpaa_ft_build_egress_encap(fwd_skb, entry, &l4_off);
++	dpaa_ft_strip_ingress_encap(fwd_skb, parse.decap_len, &parse.l4_off);
++	dpaa_ft_build_egress_encap(fwd_skb, entry, &parse.l4_off);
+ 	fwd_skb->dev = entry->egress.out_dev;
+ 	fwd_skb->priority = 0;
+ 	fwd_skb->ip_summed = CHECKSUM_NONE;
+@@ -1420,7 +1992,7 @@
+ 				      entry->egress.nat.addr);
+ 			dpaa_ft_maybe_update_l4_addr(fwd_skb, entry, old_addr,
+ 						     entry->egress.nat.addr,
+-						     l4_off);
++						     parse.l4_off);
+ 		}
+ 
+ 		if (entry->egress.nat.port_valid) {
+@@ -1452,7 +2024,7 @@
+ 
+ 			dpaa_ft_maybe_update_l4_port(fwd_skb, entry, old_port,
+ 						     entry->egress.nat.port,
+-						     l4_off);
++						     parse.l4_off);
+ 		}
+ 	}
+ 
+diff --git a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h
+--- a/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h	2026-04-22 00:56:12.631887454 +0100
++++ b/drivers/net/ethernet/freescale/dpaa/dpaa_eth.h	2026-04-22 00:56:49.971530404 +0100
+@@ -212,6 +212,19 @@
+ 	u16 sid;
+ };
+ 
++struct dpaa_ft_vlan_match {
++	bool present;
++	u16 vid;
++	__be16 proto;
++};
++
++struct dpaa_ft_ingress_recipe {
++	struct dpaa_ft_vlan_match vlan_match;
++	bool vlan_pop;
++	bool pppoe_decap;
++	__be16 ppp_proto;
++};
++
+ struct dpaa_ft_egress_recipe {
+ 	struct dpaa_ft_l2 l2;
+ 	struct dpaa_ft_nat nat;
+@@ -233,6 +246,7 @@
+ 	atomic64_t bytes;
+ 	atomic64_t lastused;
+ 	struct dpaa_ft_tuple tuple;
++	struct dpaa_ft_ingress_recipe ingress;
+ 	struct dpaa_ft_egress_recipe egress;
+ };
+ 
