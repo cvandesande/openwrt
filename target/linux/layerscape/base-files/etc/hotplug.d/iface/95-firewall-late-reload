@@ -36,6 +36,16 @@ LOCK=/var/run/firewall-late-reload.lock
 [ -e "$DONE" ] && exit 0
 mkdir "$LOCK" 2>/dev/null || exit 0
 
+late_firewall_converged() {
+	live_set="$(live_flowtable_device_set)"
+
+	[ -n "$live_set" ] || return 1
+
+	resolved_set="$(resolved_flowtable_device_set)"
+
+	[ -z "$resolved_set" ] || [ "$resolved_set" = "$live_set" ]
+}
+
 flowtable_block() {
 	sed -n '/^[[:space:]]*flowtable[[:space:]]\+ft[[:space:]]*{/,/^[[:space:]]*}[[:space:]]*$/p'
 }
@@ -91,37 +101,25 @@ resolved_flowtable_device_set() {
 (
 	trap 'rmdir "$LOCK"' EXIT INT TERM
 
-	SETTLE_DELAY=2
+	SETTLE_DELAY=5
 	POLL_INTERVAL=2
 	MAX_POLLS=6
 
 	# Only repair after WAN ifup. Earlier LAN-zone ifups can already carry
-	# software-offloaded traffic, and a later reload from those events can
+	# software-offloaded traffic, and a later restart from those events can
 	# strand upper-device flowtable entries until they expire.
 	# Let netifd finish creating the PPPoE/VLAN lower links first.
 	sleep "$SETTLE_DELAY"
 
+	logger -t firewall "Late firewall restart after $ACTION of $INTERFACE ($DEVICE) for boot-time flowtable convergence"
+	if ! fw4 -q restart; then
+		logger -p daemon.err -t firewall "Late firewall restart failed after $ACTION of $INTERFACE ($DEVICE)"
+		exit 1
+	fi
+
 	count=0
 	while [ "$count" -lt "$MAX_POLLS" ]; do
-		live_set="$(live_flowtable_device_set)"
-
-		if [ -n "$live_set" ]; then
-			resolved_set="$(resolved_flowtable_device_set)"
-
-			if [ -n "$resolved_set" ] && [ "$resolved_set" != "$live_set" ]; then
-				logger -t firewall "Late firewall reload after $ACTION of $INTERFACE ($DEVICE) refreshed flowtable device resolution"
-				fw4 -q reload
-				sleep "$POLL_INTERVAL"
-
-				post_live_set="$(live_flowtable_device_set)"
-				post_resolved_set="$(resolved_flowtable_device_set)"
-				if [ -n "$post_live_set" ] &&
-				   [ -n "$post_resolved_set" ] &&
-				   [ "$post_live_set" != "$post_resolved_set" ]; then
-					logger -t firewall "Late firewall reload did not converge flowtable device resolution"
-				fi
-			fi
-
+		if late_firewall_converged; then
 			touch "$DONE"
 			exit 0
 		fi
@@ -130,5 +128,5 @@ resolved_flowtable_device_set() {
 		sleep "$POLL_INTERVAL"
 	done
 
-	touch "$DONE"
+	logger -p daemon.err -t firewall "Late firewall restart did not converge flowtable device resolution"
 ) &

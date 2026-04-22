@@ -1,6 +1,261 @@
+diff --git a/root/etc/init.d/firewall b/root/etc/init.d/firewall
+index 9250643..7df4b78 100755
+--- a/root/etc/init.d/firewall
++++ b/root/etc/init.d/firewall
+@@ -4,6 +4,38 @@ START=19
+ USE_PROCD=1
+ QUIET=""
+ 
++normalize_bool() {
++	case "$1" in
++	1|on|true|yes)
++		echo 1
++		return 0
++	;;
++	esac
++
++	echo 0
++}
++
++state_default_bool() {
++	[ -f /var/run/fw4.state ] || return 1
++	jsonfilter -s "$(cat /var/run/fw4.state 2>/dev/null)" -e "@.defaults.$1" 2>/dev/null
++}
++
++flow_control_mode_changed() {
++	[ -f /var/run/fw4.state ] || return 0
++
++	current_flow_offloading="$(normalize_bool "$(uci -q get firewall.@defaults[0].flow_offloading)")"
++	current_flow_offloading_hw="$(normalize_bool "$(uci -q get firewall.@defaults[0].flow_offloading_hw)")"
++	current_lower_device_flowtable="$(normalize_bool "$(uci -q get firewall.@defaults[0].lower_device_flowtable)")"
++
++	loaded_flow_offloading="$(normalize_bool "$(state_default_bool flow_offloading)")"
++	loaded_flow_offloading_hw="$(normalize_bool "$(state_default_bool flow_offloading_hw)")"
++	loaded_lower_device_flowtable="$(normalize_bool "$(state_default_bool lower_device_flowtable)")"
++
++	[ "$current_flow_offloading" != "$loaded_flow_offloading" ] ||
++	[ "$current_flow_offloading_hw" != "$loaded_flow_offloading_hw" ] ||
++	[ "$current_lower_device_flowtable" != "$loaded_lower_device_flowtable" ]
++}
++
+ service_triggers() {
+ 	procd_add_reload_trigger firewall
+ 	procd_add_reload_data_trigger firewall
+@@ -22,6 +54,12 @@ stop_service() {
+ }
+ 
+ reload_service() {
++	if flow_control_mode_changed; then
++		logger -t firewall "Restarting firewall due to flow control mode change"
++		fw4 restart
++		return $?
++	fi
++
+ 	fw4 reload
+ }
+ 
+diff --git a/root/sbin/fw4 b/root/sbin/fw4
+index d9ac8a19fb6247661b5b8bc73e8c73fb91c6b826..841295f3512b42c5fcabac95ccd3d2eff1a740b5 100755
+--- a/root/sbin/fw4
++++ b/root/sbin/fw4
+@@ -16,27 +16,136 @@
+ 	exit 1
+ }
+ 
++print_nft_errors() {
++	[ -n "$QUIET" ] || cat "$1" >&2
++}
++
++render_ruleset() {
++	ACTION=start \
++		utpl -S $MAIN >"$1"
++}
++
++run_includes() {
++	ACTION=includes \
++		utpl -S $MAIN
++}
++
++flowtable_switch_error() {
++	grep -q 'Could not process rule: Resource busy' "$1" &&
++	grep -q 'flowtable ft' "$1"
++}
++
++extract_flowtable_devices() {
++	sed -n 's/.*devices[[:space:]]*=[[:space:]]*{[[:space:]]*\(.*\)[[:space:]]*}.*/\1/p' |
++		tr ',' '\n' |
++		tr -d '"' |
++		sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
++		sed '/^$/d'
++}
++
++sorted_device_set() {
++	LC_ALL=C sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//'
++}
++
++live_flowtable_device_set() {
++	nft list table inet fw4 2>/dev/null |
++		sed -n '/^[[:space:]]*flowtable[[:space:]]\+ft[[:space:]]*{/,/^[[:space:]]*}[[:space:]]*$/p' |
++		extract_flowtable_devices |
++		sorted_device_set
++}
++
++rendered_flowtable_device_set() {
++	sed -n '/^[[:space:]]*flowtable[[:space:]]\+ft[[:space:]]*{/,/^[[:space:]]*}[[:space:]]*$/p' "$1" |
++		extract_flowtable_devices |
++		sorted_device_set
++}
++
++flowtable_device_set_changed() {
++	local live_set rendered_set
++
++	live_set="$(live_flowtable_device_set)"
++	rendered_set="$(rendered_flowtable_device_set "$1")"
++
++	[ -n "$live_set" ] &&
++	[ -n "$rendered_set" ] &&
++	[ "$live_set" != "$rendered_set" ]
++}
++
++apply_ruleset_file() {
++	nft $VERBOSE -f "$1" 2>"$2"
++}
++
++prepare_recreate_ruleset_file() {
++	# After deleting the live table, any rendered flowtable delete is stale.
++	sed '/^[[:space:]]*delete flowtable inet fw4 ft[[:space:]]*$/d' "$1" >"$2"
++}
++
++recreate_ruleset_file() {
++	local recreate rc
++
++	recreate="$(mktemp)" || return 1
++	prepare_recreate_ruleset_file "$1" "$recreate"
++	nft delete table inet fw4 2>/dev/null || true
++	apply_ruleset_file "$recreate" "$2"
++	rc=$?
++	rm -f "$recreate"
++	return "$rc"
++}
++
+ start() {
+ 	{
+ 		flock -x 1000
++		local rules err rc
+ 
+ 		case "$1" in
+ 			start)
+ 				[ -f $STATE ] && die "The fw4 firewall appears to be already loaded."
+ 			;;
+ 			reload)
+-				[ ! -f $STATE ] && die "The fw4 firewall does not appear to be loaded."
+-
+-				# Delete state to force reloading ubus state
++				# A boot-time start can fail before all flowtable devices exist.
++				# Allow a later hotplug-triggered reload to recover once the
++				# missing devices appear, even if no state file was written.
+ 				rm -f $STATE
+ 			;;
+ 		esac
+ 
+-		ACTION=start \
+-			utpl -S $MAIN | nft $VERBOSE -f $STDIN
++		rules="$(mktemp)" || die "Unable to create temporary ruleset file."
++		err="$(mktemp)" || {
++			rm -f "$rules"
++			die "Unable to create temporary nft error file."
++		}
++
++		if ! render_ruleset "$rules"; then
++			rc=$?
++			rm -f "$rules" "$err"
++			exit "$rc"
++		fi
++
++		if [ "$1" = reload ] && flowtable_device_set_changed "$rules"; then
++			: >"$err"
++			recreate_ruleset_file "$rules" "$err" || {
++				print_nft_errors "$err"
++				rm -f "$rules" "$err"
++				exit 1
++			}
++		elif ! apply_ruleset_file "$rules" "$err"; then
++			if [ "$1" = reload ] && flowtable_switch_error "$err"; then
++				: >"$err"
++				recreate_ruleset_file "$rules" "$err" || {
++					print_nft_errors "$err"
++					rm -f "$rules" "$err"
++					exit 1
++				}
++			else
++				print_nft_errors "$err"
++				rm -f "$rules" "$err"
++				exit 1
++			fi
++		fi
++
++		rm -f "$rules" "$err"
+ 
+-		ACTION=includes \
+-			utpl -S $MAIN
++		run_includes
+ 	} 1000>$LOCK
+ }
+ 
+@@ -73,6 +182,37 @@
+ 		flock -x $LOCK utpl -S $MAIN | nft $VERBOSE -f $STDIN
+ }
+ 
++restart() {
++	{
++		flock -x 1000
++		local rules err rc
++
++		rules="$(mktemp)" || die "Unable to create temporary ruleset file."
++		err="$(mktemp)" || {
++			rm -f "$rules"
++			die "Unable to create temporary nft error file."
++		}
++
++		if ! render_ruleset "$rules"; then
++			rc=$?
++			rm -f "$rules" "$err"
++			exit "$rc"
++		fi
++
++		# A live flowtable mode switch can fail nft -c validation against the
++		# still-loaded table even though delete-and-recreate is the right path.
++		: >"$err"
++		recreate_ruleset_file "$rules" "$err" || {
++			print_nft_errors "$err"
++			rm -f "$rules" "$err"
++			die "The rendered ruleset contains errors, not doing firewall restart."
++		}
++
++		rm -f "$rules" "$err"
++		run_includes
++	} 1000>$LOCK
++}
++
+ lookup() {
+ 	ACTION=$1 OBJECT=$2 DEVICE=$3 \
+ 		flock -x $LOCK utpl -S $MAIN
+@@ -105,9 +245,7 @@
+ 		flush
+ 	;;
+ 	restart)
+-		QUIET=1 print | nft ${VERBOSE} -c -f $STDIN || die "The rendered ruleset contains errors, not doing firewall restart."
+-		stop || rm -f $STATE
+-		start
++		restart
+ 	;;
+ 	check)
+ 		if [ -n "$QUIET" ]; then
+diff --git a/root/usr/share/ucode/fw4.uc b/root/usr/share/ucode/fw4.uc
+index 690deb0..6cd2ae0 100644
 --- a/root/usr/share/ucode/fw4.uc
 +++ b/root/usr/share/ucode/fw4.uc
-@@ -509,8 +509,8 @@
+@@ -509,8 +509,8 @@ return {
  		if (!this.default_option("flow_offloading_hw"))
  			return null;
  
@@ -10,7 +265,7 @@
  		let bus = ubus.connect();
  
  		if (bus) {
-@@ -520,14 +520,20 @@
+@@ -520,14 +520,20 @@ return {
  
  		for (let zone in this.zones())
  			for (let device in zone.related_physdevs)
@@ -34,7 +289,7 @@
  			this.warn('Hardware flow offloading unavailable, falling back to software offloading');
  			this.state.defaults.flow_offloading_hw = false;
  
-@@ -537,24 +543,41 @@
+@@ -537,24 +543,41 @@ return {
  		return devices;
  	},
  
@@ -88,7 +343,7 @@
  	},
  
  	check_set_types: function() {
-@@ -1970,6 +1993,10 @@
+@@ -1970,6 +1993,10 @@ return {
  			custom_chains: [ "bool", null, UNSUPPORTED ],
  			disable_ipv6: [ "bool", null, UNSUPPORTED ],
  			flow_offloading: [ "bool", "0" ],
@@ -99,149 +354,12 @@
  			flow_offloading_hw: [ "bool", "0" ],
  
  			auto_includes: [ "bool", "1" ]
---- a/root/sbin/fw4
-+++ b/root/sbin/fw4
-@@ -16,9 +16,42 @@
- 	exit 1
- }
- 
-+print_nft_errors() {
-+	[ -n "$QUIET" ] || cat "$1" >&2
-+}
-+
-+render_ruleset() {
-+	ACTION=start \
-+		utpl -S $MAIN >"$1"
-+}
-+
-+run_includes() {
-+	ACTION=includes \
-+		utpl -S $MAIN
-+}
-+
-+flowtable_switch_error() {
-+	grep -q 'Could not process rule: Resource busy' "$1" &&
-+	grep -q 'flowtable ft' "$1"
-+}
-+
-+apply_ruleset_file() {
-+	nft $VERBOSE -f "$1" 2>"$2"
-+}
-+
-+check_ruleset_file() {
-+	nft $VERBOSE -c -f "$1" 2>"$2"
-+}
-+
-+recreate_ruleset_file() {
-+	nft delete table inet fw4 2>/dev/null || true
-+	apply_ruleset_file "$1" "$2"
-+}
-+
- start() {
- 	{
- 		flock -x 1000
-+		local rules err rc
- 
- 		case "$1" in
- 			start)
-@@ -32,11 +65,36 @@
- 			;;
- 		esac
- 
--		ACTION=start \
--			utpl -S $MAIN | nft $VERBOSE -f $STDIN
-+		rules="$(mktemp)" || die "Unable to create temporary ruleset file."
-+		err="$(mktemp)" || {
-+			rm -f "$rules"
-+			die "Unable to create temporary nft error file."
-+		}
-+
-+		if ! render_ruleset "$rules"; then
-+			rc=$?
-+			rm -f "$rules" "$err"
-+			exit "$rc"
-+		fi
-+
-+		if ! apply_ruleset_file "$rules" "$err"; then
-+			if [ "$1" = reload ] && flowtable_switch_error "$err"; then
-+				: >"$err"
-+				recreate_ruleset_file "$rules" "$err" || {
-+					print_nft_errors "$err"
-+					rm -f "$rules" "$err"
-+					exit 1
-+				}
-+			else
-+				print_nft_errors "$err"
-+				rm -f "$rules" "$err"
-+				exit 1
-+			fi
-+		fi
- 
--		ACTION=includes \
--			utpl -S $MAIN
-+		rm -f "$rules" "$err"
-+
-+		run_includes
- 	} 1000>$LOCK
- }
- 
-@@ -78,6 +136,42 @@
- 		flock -x $LOCK utpl -S $MAIN
- }
- 
-+restart() {
-+	{
-+		flock -x 1000
-+		local rules err rc
-+
-+		rules="$(mktemp)" || die "Unable to create temporary ruleset file."
-+		err="$(mktemp)" || {
-+			rm -f "$rules"
-+			die "Unable to create temporary nft error file."
-+		}
-+
-+		if ! render_ruleset "$rules"; then
-+			rc=$?
-+			rm -f "$rules" "$err"
-+			exit "$rc"
-+		fi
-+
-+		if ! check_ruleset_file "$rules" "$err" &&
-+		   ! flowtable_switch_error "$err"; then
-+			print_nft_errors "$err"
-+			rm -f "$rules" "$err"
-+			die "The rendered ruleset contains errors, not doing firewall restart."
-+		fi
-+
-+		: >"$err"
-+		recreate_ruleset_file "$rules" "$err" || {
-+			print_nft_errors "$err"
-+			rm -f "$rules" "$err"
-+			die "The rendered ruleset contains errors, not doing firewall restart."
-+		}
-+
-+		rm -f "$rules" "$err"
-+		run_includes
-+	} 1000>$LOCK
-+}
-+
- while [ -n "$1" ]; do
- 	case "$1" in
- 		-q)
-@@ -105,9 +199,7 @@
- 		flush
- 	;;
- 	restart)
--		QUIET=1 print | nft ${VERBOSE} -c -f $STDIN || die "The rendered ruleset contains errors, not doing firewall restart."
--		stop || rm -f $STATE
--		start
-+		restart
- 	;;
- 	check)
- 		if [ -n "$QUIET" ]; then
+diff --git a/tests/01_configuration/03_lower_devices b/tests/01_configuration/03_lower_devices
+new file mode 100644
+index 0000000..b615ba2
 --- /dev/null
 +++ b/tests/01_configuration/03_lower_devices
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,85 @@
 +Verifies that an explicit lower-device flowtable policy also applies to
 +software flow offloading.
 +
@@ -304,8 +422,17 @@
 +-- File fs/opendir~_sys_class_net_eth1_18.json --
 +[ "lower_eth1" ]
 +-- End --
++-- File fs/opendir~_sys_class_net_eth1.json --
++[]
++-- End --
 +-- File fs/opendir~_sys_class_net_eth0_10.json --
 +[ "lower_eth0" ]
++-- End --
++-- File fs/opendir~_sys_class_net_eth0.json --
++[]
++-- End --
++-- File fs/opendir~_sys_class_net_eth2.json --
++[]
 +-- End --
 +-- File fs/opendir~_sys_class_net_pppoe-wan.json --
 +[]
