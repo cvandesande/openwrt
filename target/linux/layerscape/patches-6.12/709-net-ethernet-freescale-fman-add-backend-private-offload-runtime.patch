@@ -1,0 +1,1055 @@
+--- a/drivers/net/ethernet/freescale/fman/Makefile
++++ b/drivers/net/ethernet/freescale/fman/Makefile
+@@ -5,6 +5,7 @@
+ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_fman_port.o
+ obj-$(CONFIG_FSL_FMAN) += fsl_dpaa_mac.o
+ 
+-fsl_dpaa_fman-objs	:= fman_muram.o fman.o fman_sp.o fman_keygen.o
++fsl_dpaa_fman-objs	:= fman_muram.o fman.o fman_sp.o fman_keygen.o \
++			   fman_hw_runtime.o
+ fsl_dpaa_fman_port-objs := fman_port.o
+ fsl_dpaa_mac-objs:= mac.o fman_dtsec.o fman_memac.o fman_tgec.o
+--- a/drivers/net/ethernet/freescale/fman/fman.c
++++ b/drivers/net/ethernet/freescale/fman/fman.c
+@@ -21,6 +21,7 @@
+ #include "fman.h"
+ #include "fman_muram.h"
+ #include "fman_keygen.h"
++#include "fman_hw_runtime.h"
+ 
+ /* General defines */
+ #define FMAN_LIODN_TBL			64	/* size of LIODN table */
+@@ -1998,9 +1999,15 @@
+ 	if (!fman->keygen)
+ 		return -EINVAL;
+ 
++	err = fman_hw_runtime_init(fman);
++	if (err)
++		return err;
++
+ 	err = enable(fman, cfg);
+-	if (err != 0)
++	if (err != 0) {
++		fman_hw_runtime_destroy(fman);
+ 		return err;
++	}
+ 
+ 	enable_time_stamp(fman);
+ 
+--- a/drivers/net/ethernet/freescale/fman/fman.h
++++ b/drivers/net/ethernet/freescale/fman/fman.h
+@@ -322,6 +322,7 @@
+ 	/* Fifo in MURAM */
+ 	unsigned long fifo_offset;
+ 	size_t fifo_size;
++	void *offload_runtime;
+ 
+ 	u32 liodn_base[64];
+ 	u32 liodn_offset[64];
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.h
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.h
+@@ -24,11 +24,22 @@
+ 	u8 hash_shift;
+ };
+ 
++struct fman_keygen_state {
++	u8 scheme_total;
++	u8 scheme_in_use;
++	u8 scheme_reserved;
++};
++
+ struct fman_keygen *keygen_init(struct fman_kg_regs __iomem *keygen_regs);
+ 
++int keygen_get_state(struct fman_keygen *keygen,
++		     struct fman_keygen_state *state);
+ int keygen_port_scheme_alloc(struct fman_keygen *keygen, u8 hw_port_id,
+ 			     const struct fman_kg_scheme_params *params,
+ 			     u8 *scheme_id);
++int keygen_port_scheme_reserve(struct fman_keygen *keygen, u8 hw_port_id,
++			       u8 *scheme_id);
++int keygen_port_scheme_release(struct fman_keygen *keygen, u8 scheme_id);
+ int keygen_port_scheme_free(struct fman_keygen *keygen, u8 scheme_id);
+ 
+ int keygen_port_hashing_init(struct fman_keygen *keygen, u8 hw_port_id,
+--- a/drivers/net/ethernet/freescale/fman/fman_keygen.c
++++ b/drivers/net/ethernet/freescale/fman/fman_keygen.c
+@@ -196,6 +196,7 @@
+ /* KeyGen Scheme data */
+ struct keygen_scheme {
+ 	bool used;	/* Specifies if this scheme is used */
++	bool reserved;	/* Reservation without a programmed scheme payload */
+ 	u8 hw_port_id;
+ 		/* Hardware port ID
+ 		 * schemes sharing between multiple ports is not
+@@ -424,7 +425,8 @@
+ 	u8 i;
+ 
+ 	for (i = 0; i < FM_KG_MAX_NUM_OF_SCHEMES; i++)
+-		if (!keygen->schemes[i].used) {
++		if (!keygen->schemes[i].used &&
++		    !keygen->schemes[i].reserved) {
+ 			*scheme_id = i;
+ 			return 0;
+ 		}
+@@ -674,6 +676,28 @@
+ }
+ EXPORT_SYMBOL(keygen_init);
+ 
++int keygen_get_state(struct fman_keygen *keygen,
++		     struct fman_keygen_state *state)
++{
++	u8 i;
++
++	if (!keygen || !state)
++		return -EINVAL;
++
++	memset(state, 0, sizeof(*state));
++	state->scheme_total = FM_KG_MAX_NUM_OF_SCHEMES;
++
++	for (i = 0; i < FM_KG_MAX_NUM_OF_SCHEMES; i++) {
++		if (keygen->schemes[i].used)
++			state->scheme_in_use++;
++		else if (keygen->schemes[i].reserved)
++			state->scheme_reserved++;
++	}
++
++	return 0;
++}
++EXPORT_SYMBOL(keygen_get_state);
++
+ int keygen_port_scheme_alloc(struct fman_keygen *keygen, u8 hw_port_id,
+ 			     const struct fman_kg_scheme_params *params,
+ 			     u8 *scheme_id)
+@@ -753,6 +777,56 @@
+ }
+ EXPORT_SYMBOL(keygen_port_scheme_alloc);
+ 
++int keygen_port_scheme_reserve(struct fman_keygen *keygen, u8 hw_port_id,
++			       u8 *scheme_id)
++{
++	struct keygen_scheme *scheme;
++	u8 id;
++	int err;
++
++	if (!keygen || !scheme_id)
++		return -EINVAL;
++
++	if (hw_port_id >= FMAN_MAX_NUM_OF_HW_PORTS)
++		return -EINVAL;
++
++	err = get_free_scheme_id(keygen, &id);
++	if (err)
++		return err;
++
++	scheme = get_scheme(keygen, id);
++	if (!scheme)
++		return -EINVAL;
++
++	memset(scheme, 0, sizeof(*scheme));
++	scheme->reserved = true;
++	scheme->hw_port_id = hw_port_id;
++	*scheme_id = id;
++
++	return 0;
++}
++EXPORT_SYMBOL(keygen_port_scheme_reserve);
++
++int keygen_port_scheme_release(struct fman_keygen *keygen, u8 scheme_id)
++{
++	struct keygen_scheme *scheme;
++
++	if (!keygen)
++		return -EINVAL;
++
++	scheme = get_scheme(keygen, scheme_id);
++	if (!scheme || !scheme->reserved)
++		return -ENOENT;
++
++	if (scheme->used)
++		return -EBUSY;
++
++	memset(scheme, 0, sizeof(*scheme));
++
++	return 0;
++}
++EXPORT_SYMBOL(keygen_port_scheme_release);
++
+ int keygen_port_scheme_free(struct fman_keygen *keygen, u8 scheme_id)
+ {
+ 	struct keygen_scheme *scheme;
+--- a/drivers/net/ethernet/freescale/fman/fman_hw_runtime.h
++++ b/drivers/net/ethernet/freescale/fman/fman_hw_runtime.h
+@@ -0,0 +1,44 @@
++/* SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0-or-later */
++
++#ifndef __FMAN_HW_RUNTIME_H
++#define __FMAN_HW_RUNTIME_H
++
++struct fman;
++struct fman_port;
++struct fman_offload_flow;
++struct fman_offload_request;
++struct fman_offload_runtime_state;
++struct fman_offload_snapshot;
++struct fman_offload_stats;
++
++int fman_hw_runtime_init(struct fman *fman);
++
++void fman_hw_runtime_destroy(struct fman *fman);
++
++int fman_hw_runtime_get_state(struct fman *fman,
++			      struct fman_offload_runtime_state *state);
++
++int fman_hw_runtime_prepare_exact(struct fman *fman,
++				  struct fman_port *rx_port,
++				  struct fman_port *tx_port,
++				  const struct fman_offload_request *req,
++				  struct fman_offload_flow **flow,
++				  struct fman_offload_snapshot *snapshot);
++
++int fman_hw_runtime_activate(struct fman_offload_flow *flow,
++			     struct fman_offload_snapshot *snapshot);
++
++int fman_hw_runtime_remove(struct fman_offload_flow *flow,
++			   struct fman_offload_snapshot *snapshot);
++
++int fman_hw_runtime_get_stats(struct fman_offload_flow *flow,
++			      struct fman_offload_stats *stats);
++
++int fman_hw_runtime_get_snapshot(struct fman_offload_flow *flow,
++				 struct fman_offload_snapshot *snapshot);
++
++int fman_hw_runtime_quiesce(struct fman *fman);
++
++int fman_hw_runtime_resume(struct fman *fman);
++
++#endif /* __FMAN_HW_RUNTIME_H */
+--- a/drivers/net/ethernet/freescale/fman/fman_hw_runtime.c
++++ b/drivers/net/ethernet/freescale/fman/fman_hw_runtime.c
+@@ -0,0 +1,469 @@
++// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0-or-later
++/*
++ * Backend-private exact-class FMAN runtime staging.
++ *
++ * The live HC/PCD commit path remains later work. Stage 1 still owns the
++ * runtime object model, MURAM materialization, KeyGen reservation, rollback,
++ * and observability for the exact primary outbound class.
++ */
++
++#include <linux/err.h>
++#include <linux/etherdevice.h>
++#include <linux/if_pppox.h>
++#include <linux/ip.h>
++#include <linux/list.h>
++#include <linux/mutex.h>
++#include <linux/slab.h>
++#include <linux/tcp.h>
++#include <linux/udp.h>
++#include <linux/if_vlan.h>
++
++#include "fman_hw_runtime.h"
++#include "fman_muram.h"
++#include "fman_port.h"
++
++struct fman_hw_runtime {
++	struct fman *fman;
++	struct mutex lock;
++	struct list_head flows;
++	bool ready;
++	bool quiesced;
++	u32 next_generation;
++	u32 active_flows;
++	u64 prepare_count;
++	u64 prepare_failures;
++	u64 activate_count;
++	u64 activate_unavailable;
++	u64 activate_failures;
++	u64 remove_count;
++	u64 remove_failures;
++	u64 rollback_count;
++	u64 stats_queries;
++	int last_error;
++};
++
++struct fman_offload_flow {
++	struct list_head node;
++	struct fman_hw_runtime *runtime;
++	struct fman *fman;
++	struct fman_port *rx_port;
++	struct fman_port *tx_port;
++	struct fman_offload_snapshot snapshot;
++	size_t muram_size;
++};
++
++static struct fman_hw_runtime *fman_runtime(struct fman *fman)
++{
++	return fman ? fman->offload_runtime : NULL;
++}
++
++static void fman_hw_runtime_copy_bytes(u8 *dst, const u8 *src, size_t len)
++{
++	size_t i;
++
++	for (i = 0; i < len; i++)
++		dst[i] = src[i];
++}
++
++static void fman_hw_runtime_write_be16(u8 *dst, __be16 value)
++{
++	dst[0] = ((u8 *)&value)[0];
++	dst[1] = ((u8 *)&value)[1];
++}
++
++static int fman_hw_runtime_fill_template(struct fman_offload_flow *flow,
++					 const struct fman_offload_request *req)
++{
++	struct fman *fman = flow->fman;
++	struct fman_offload_snapshot *snapshot = &flow->snapshot;
++	__be16 vlan_tci;
++	__be16 pppoe_sid;
++	unsigned long vaddr;
++	unsigned long offset;
++	u8 *template;
++	size_t size;
++
++	size = ALIGN(ETH_HLEN + VLAN_HLEN + PPPOE_SES_HLEN, 16);
++	offset = fman_muram_alloc(fman->muram, size);
++	if (IS_ERR_VALUE(offset))
++		return -ENOMEM;
++
++	vaddr = fman_muram_offset_to_vbase(fman->muram, offset);
++	if (!vaddr) {
++		fman_muram_free_mem(fman->muram, offset, size);
++		return -ENOMEM;
++	}
++
++	template = (u8 *)vaddr;
++	vlan_tci = htons((u16)(req->vlan_vid & VLAN_VID_MASK) |
++			 ((u16)(req->vlan_prio & 0x7) << VLAN_PRIO_SHIFT));
++	pppoe_sid = htons(req->pppoe_sid);
++
++	/*
++	 * MURAM staging buffers may fault on widened unaligned stores. Build
++	 * the exact-class header template bytewise so the source MAC at +6 and
++	 * the PPPoE payload fields do not rely on packed-struct writes.
++	 */
++	fman_hw_runtime_copy_bytes(template, req->dst, ETH_ALEN);
++	fman_hw_runtime_copy_bytes(template + ETH_ALEN, req->src, ETH_ALEN);
++	fman_hw_runtime_write_be16(template + 2 * ETH_ALEN, req->vlan_proto);
++	fman_hw_runtime_write_be16(template + 2 * ETH_ALEN + 2, vlan_tci);
++	fman_hw_runtime_write_be16(template + 2 * ETH_ALEN + 4,
++				   htons(ETH_P_PPP_SES));
++	template[ETH_HLEN + VLAN_HLEN] = 0x11;
++	template[ETH_HLEN + VLAN_HLEN + 1] = 0x00;
++	fman_hw_runtime_write_be16(template + ETH_HLEN + VLAN_HLEN + 2,
++				   pppoe_sid);
++	fman_hw_runtime_write_be16(template + ETH_HLEN + VLAN_HLEN + 4, 0);
++	fman_hw_runtime_write_be16(template + ETH_HLEN + VLAN_HLEN + 6,
++				   req->ppp_proto);
++
++	flow->muram_size = size;
++	snapshot->hm.muram_offset = offset;
++	snapshot->hm.template_len = ETH_HLEN + VLAN_HLEN + PPPOE_SES_HLEN;
++	snapshot->hm.pppoe_len_offset =
++		ETH_HLEN + VLAN_HLEN + offsetof(struct pppoe_hdr, length);
++	snapshot->hm.snat_addr_offset =
++		snapshot->hm.template_len + offsetof(struct iphdr, saddr);
++	snapshot->hm.snat_port_offset =
++		snapshot->hm.template_len + sizeof(struct iphdr) +
++		offsetof(struct udphdr, source);
++
++	return 0;
++}
++
++static void fman_hw_runtime_snapshot(struct fman_offload_flow *flow,
++				     struct fman_offload_snapshot *snapshot)
++{
++	if (!snapshot)
++		return;
++
++	*snapshot = flow->snapshot;
++}
++
++static void fman_hw_runtime_rollback(struct fman_offload_flow *flow)
++{
++	struct fman_hw_runtime *runtime = flow->runtime;
++
++	if (flow->snapshot.ingress.keygen_reserved)
++		fman_port_release_kg_scheme(flow->rx_port,
++					    flow->snapshot.ingress
++						    .keygen_scheme_id);
++
++	if (flow->snapshot.hm.valid && flow->muram_size)
++		fman_muram_free_mem(flow->fman->muram,
++				    flow->snapshot.hm.muram_offset,
++				    flow->muram_size);
++
++	runtime->rollback_count++;
++}
++
++static int fman_hw_runtime_validate_request(struct fman *fman,
++					    struct fman_port *rx_port,
++					    struct fman_port *tx_port,
++					    const struct fman_offload_request *req)
++{
++	if (!fman || !rx_port || !tx_port || !req)
++		return -EINVAL;
++
++	if (req->exact_class !=
++	    FMAN_OFFLOAD_EXACT_CLASS_PRIMARY_OUTBOUND_ETH2_PPPOE_WAN)
++		return -EOPNOTSUPP;
++
++	if (req->network_proto != htons(ETH_P_IP))
++		return -EOPNOTSUPP;
++
++	if (req->ip_proto != IPPROTO_TCP && req->ip_proto != IPPROTO_UDP)
++		return -EOPNOTSUPP;
++
++	if (req->vlan_proto != htons(ETH_P_8021Q) || req->vlan_vid != 10 ||
++	    !req->pppoe_sid)
++		return -EOPNOTSUPP;
++
++	return 0;
++}
++
++int fman_hw_runtime_init(struct fman *fman)
++{
++	struct fman_hw_runtime *runtime;
++
++	if (!fman)
++		return -EINVAL;
++
++	runtime = kzalloc(sizeof(*runtime), GFP_KERNEL);
++	if (!runtime)
++		return -ENOMEM;
++
++	runtime->fman = fman;
++	runtime->ready = !!(fman->muram && fman->keygen);
++	INIT_LIST_HEAD(&runtime->flows);
++	mutex_init(&runtime->lock);
++	fman->offload_runtime = runtime;
++
++	return 0;
++}
++
++void fman_hw_runtime_destroy(struct fman *fman)
++{
++	struct fman_hw_runtime *runtime = fman_runtime(fman);
++	struct fman_offload_flow *flow, *tmp;
++
++	if (!runtime)
++		return;
++
++	mutex_lock(&runtime->lock);
++	list_for_each_entry_safe(flow, tmp, &runtime->flows, node) {
++		list_del(&flow->node);
++		fman_hw_runtime_rollback(flow);
++		kfree(flow);
++	}
++	mutex_unlock(&runtime->lock);
++
++	kfree(runtime);
++	fman->offload_runtime = NULL;
++}
++
++int fman_hw_runtime_get_state(struct fman *fman,
++			      struct fman_offload_runtime_state *state)
++{
++	struct fman_hw_runtime *runtime = fman_runtime(fman);
++
++	if (!runtime || !state)
++		return -EINVAL;
++
++	mutex_lock(&runtime->lock);
++	state->ready = runtime->ready;
++	state->quiesced = runtime->quiesced;
++	state->live_commit_available = false;
++	state->active_flows = runtime->active_flows;
++	state->prepare_count = runtime->prepare_count;
++	state->prepare_failures = runtime->prepare_failures;
++	state->activate_count = runtime->activate_count;
++	state->activate_unavailable = runtime->activate_unavailable;
++	state->activate_failures = runtime->activate_failures;
++	state->remove_count = runtime->remove_count;
++	state->remove_failures = runtime->remove_failures;
++	state->rollback_count = runtime->rollback_count;
++	state->stats_queries = runtime->stats_queries;
++	state->last_error = runtime->last_error;
++	mutex_unlock(&runtime->lock);
++
++	return 0;
++}
++
++int fman_hw_runtime_prepare_exact(struct fman *fman,
++				  struct fman_port *rx_port,
++				  struct fman_port *tx_port,
++				  const struct fman_offload_request *req,
++				  struct fman_offload_flow **flow_out,
++				  struct fman_offload_snapshot *snapshot)
++{
++	struct fman_hw_runtime *runtime = fman_runtime(fman);
++	struct fman_offload_flow *flow;
++	u8 scheme_id;
++	u32 hash_result_offset = 0;
++	int err;
++
++	if (!runtime || !flow_out)
++		return -EINVAL;
++
++	mutex_lock(&runtime->lock);
++	runtime->prepare_count++;
++	err = fman_hw_runtime_validate_request(fman, rx_port, tx_port, req);
++	if (err)
++		goto fail_locked;
++
++	if (!runtime->ready || runtime->quiesced) {
++		err = -EOPNOTSUPP;
++		goto fail_locked;
++	}
++
++	flow = kzalloc(sizeof(*flow), GFP_KERNEL);
++	if (!flow) {
++		err = -ENOMEM;
++		goto fail_locked;
++	}
++
++	flow->runtime = runtime;
++	flow->fman = fman;
++	flow->rx_port = rx_port;
++	flow->tx_port = tx_port;
++	flow->snapshot.valid = true;
++	flow->snapshot.cookie = req->cookie;
++	flow->snapshot.generation = ++runtime->next_generation;
++	flow->snapshot.exact_class = req->exact_class;
++	flow->snapshot.lifecycle = FMAN_OFFLOAD_LIFECYCLE_PREPARED;
++	flow->snapshot.binding = req->binding;
++	flow->snapshot.enqueue.valid = true;
++	flow->snapshot.enqueue.tx_port_id = req->binding.tx_port_id;
++	flow->snapshot.enqueue.qman_channel_id =
++		fman_port_get_qman_channel_id(tx_port);
++	flow->snapshot.enqueue.compiled_out_ifindex = req->compiled_out_ifindex;
++	flow->snapshot.enqueue.logical_out_ifindex = req->logical_out_ifindex;
++	flow->snapshot.enqueue.binding_ifindex = req->binding_ifindex;
++	flow->snapshot.hm.valid = true;
++	flow->snapshot.hm.header_len = ETH_HLEN + VLAN_HLEN + PPPOE_SES_HLEN;
++	ether_addr_copy(flow->snapshot.hm.src, req->src);
++	ether_addr_copy(flow->snapshot.hm.dst, req->dst);
++	flow->snapshot.hm.vlan_vid = req->vlan_vid;
++	flow->snapshot.hm.vlan_proto = req->vlan_proto;
++	flow->snapshot.hm.vlan_prio = req->vlan_prio;
++	flow->snapshot.hm.pppoe_sid = req->pppoe_sid;
++	flow->snapshot.hm.ppp_proto = req->ppp_proto;
++	flow->snapshot.hm.snat_addr = req->snat_addr;
++	flow->snapshot.hm.snat_port_valid = req->snat_port_valid;
++	flow->snapshot.hm.snat_port = req->snat_port;
++	flow->snapshot.ingress.valid = true;
++	flow->snapshot.ingress.uses_port_private_key = true;
++	flow->snapshot.stats.valid = true;
++
++	if (!fman_port_get_hash_result_offset(rx_port, &hash_result_offset))
++		flow->snapshot.ingress.hash_result_offset = hash_result_offset;
++
++	err = fman_port_reserve_kg_scheme(rx_port, &scheme_id);
++	if (err)
++		goto fail_flow;
++
++	flow->snapshot.ingress.keygen_reserved = true;
++	flow->snapshot.ingress.keygen_scheme_id = scheme_id;
++
++	err = fman_hw_runtime_fill_template(flow, req);
++	if (err)
++		goto fail_flow;
++
++	flow->snapshot.lifecycle = FMAN_OFFLOAD_LIFECYCLE_OBJECTS_STAGED;
++	flow->snapshot.live_commit_available = false;
++	list_add_tail(&flow->node, &runtime->flows);
++	runtime->active_flows++;
++	runtime->last_error = 0;
++	mutex_unlock(&runtime->lock);
++
++	*flow_out = flow;
++	fman_hw_runtime_snapshot(flow, snapshot);
++
++	return 0;
++
++fail_flow:
++	flow->snapshot.last_error = err;
++	fman_hw_runtime_rollback(flow);
++	kfree(flow);
++fail_locked:
++	runtime->prepare_failures++;
++	runtime->last_error = err;
++	mutex_unlock(&runtime->lock);
++
++	return err;
++}
++
++int fman_hw_runtime_activate(struct fman_offload_flow *flow,
++			     struct fman_offload_snapshot *snapshot)
++{
++	struct fman_hw_runtime *runtime;
++
++	if (!flow)
++		return -EINVAL;
++
++	runtime = flow->runtime;
++	mutex_lock(&runtime->lock);
++	runtime->activate_count++;
++	runtime->activate_unavailable++;
++	runtime->last_error = -EOPNOTSUPP;
++	flow->snapshot.last_error = -EOPNOTSUPP;
++	flow->snapshot.lifecycle = FMAN_OFFLOAD_LIFECYCLE_ACTIVATE_UNAVAILABLE;
++	fman_hw_runtime_snapshot(flow, snapshot);
++	mutex_unlock(&runtime->lock);
++
++	return -EOPNOTSUPP;
++}
++
++int fman_hw_runtime_remove(struct fman_offload_flow *flow,
++			   struct fman_offload_snapshot *snapshot)
++{
++	struct fman_hw_runtime *runtime;
++
++	if (!flow)
++		return -EINVAL;
++
++	runtime = flow->runtime;
++	mutex_lock(&runtime->lock);
++	runtime->remove_count++;
++	flow->snapshot.lifecycle = FMAN_OFFLOAD_LIFECYCLE_REMOVED;
++	flow->snapshot.last_error = 0;
++	fman_hw_runtime_snapshot(flow, snapshot);
++	list_del(&flow->node);
++	runtime->active_flows--;
++	fman_hw_runtime_rollback(flow);
++	runtime->last_error = 0;
++	mutex_unlock(&runtime->lock);
++
++	kfree(flow);
++
++	return 0;
++}
++
++int fman_hw_runtime_get_stats(struct fman_offload_flow *flow,
++			      struct fman_offload_stats *stats)
++{
++	struct fman_hw_runtime *runtime;
++
++	if (!flow || !stats)
++		return -EINVAL;
++
++	runtime = flow->runtime;
++	mutex_lock(&runtime->lock);
++	runtime->stats_queries++;
++	flow->snapshot.stats.reads++;
++	stats->hardware_counters_available = false;
++	stats->packets = flow->snapshot.stats.last_packets;
++	stats->bytes = flow->snapshot.stats.last_bytes;
++	stats->reads = flow->snapshot.stats.reads;
++	runtime->last_error = -EOPNOTSUPP;
++	flow->snapshot.last_error = -EOPNOTSUPP;
++	mutex_unlock(&runtime->lock);
++
++	return -EOPNOTSUPP;
++}
++
++int fman_hw_runtime_get_snapshot(struct fman_offload_flow *flow,
++				 struct fman_offload_snapshot *snapshot)
++{
++	struct fman_hw_runtime *runtime;
++
++	if (!flow || !snapshot)
++		return -EINVAL;
++
++	runtime = flow->runtime;
++	mutex_lock(&runtime->lock);
++	fman_hw_runtime_snapshot(flow, snapshot);
++	mutex_unlock(&runtime->lock);
++
++	return 0;
++}
++
++int fman_hw_runtime_quiesce(struct fman *fman)
++{
++	struct fman_hw_runtime *runtime = fman_runtime(fman);
++
++	if (!runtime)
++		return -EINVAL;
++
++	mutex_lock(&runtime->lock);
++	runtime->quiesced = true;
++	mutex_unlock(&runtime->lock);
++
++	return 0;
++}
++
++int fman_hw_runtime_resume(struct fman *fman)
++{
++	struct fman_hw_runtime *runtime = fman_runtime(fman);
++
++	if (!runtime)
++		return -EINVAL;
++
++	mutex_lock(&runtime->lock);
++	runtime->quiesced = false;
++	mutex_unlock(&runtime->lock);
++
++	return 0;
++}
+--- a/drivers/net/ethernet/freescale/fman/fman_port.h
++++ b/drivers/net/ethernet/freescale/fman/fman_port.h
+@@ -6,6 +6,8 @@
+ #ifndef __FMAN_PORT_H
+ #define __FMAN_PORT_H
+ 
++#include <linux/if_ether.h>
++
+ #include "fman.h"
+ #include "fman_keygen.h"
+ 
+@@ -69,10 +71,136 @@
+ #define FM_PORT_FRM_ERR_PROCESS_TIMEOUT         0x00000001
+ 
+ struct fman_port;
++struct fman_offload_flow;
+ 
+ struct fman_port_offload_info {
+ 	u8 port_id;
+ 	bool kg_hash_enabled;
++	bool kg_scheme_api_available;
++	u8 kg_scheme_total;
++	u8 kg_scheme_in_use;
++	u8 kg_scheme_reserved;
++	u8 kg_scheme_free;
++};
++
++enum fman_offload_exact_class {
++	FMAN_OFFLOAD_EXACT_CLASS_NONE = 0,
++	FMAN_OFFLOAD_EXACT_CLASS_PRIMARY_OUTBOUND_ETH2_PPPOE_WAN,
++	FMAN_OFFLOAD_EXACT_CLASS_MAX,
++};
++
++enum fman_offload_lifecycle {
++	FMAN_OFFLOAD_LIFECYCLE_NONE = 0,
++	FMAN_OFFLOAD_LIFECYCLE_PREPARED,
++	FMAN_OFFLOAD_LIFECYCLE_OBJECTS_STAGED,
++	FMAN_OFFLOAD_LIFECYCLE_ACTIVATE_UNAVAILABLE,
++	FMAN_OFFLOAD_LIFECYCLE_REMOVED,
++	FMAN_OFFLOAD_LIFECYCLE_FAILED,
++	FMAN_OFFLOAD_LIFECYCLE_MAX,
++};
++
++struct fman_offload_binding {
++	u8 rx_port_id;
++	u8 tx_port_id;
++	u32 rx_pcd_base_fqid;
++	u32 rx_pcd_fq_count;
++};
++
++struct fman_offload_request {
++	unsigned long cookie;
++	enum fman_offload_exact_class exact_class;
++	struct fman_offload_binding binding;
++	__be16 network_proto;
++	u8 ip_proto;
++	unsigned char src[ETH_ALEN];
++	unsigned char dst[ETH_ALEN];
++	u16 vlan_vid;
++	__be16 vlan_proto;
++	u8 vlan_prio;
++	u16 pppoe_sid;
++	__be16 ppp_proto;
++	__be32 snat_addr;
++	bool snat_port_valid;
++	__be16 snat_port;
++	u32 compiled_out_ifindex;
++	u32 logical_out_ifindex;
++	u32 binding_ifindex;
++};
++
++struct fman_offload_stats {
++	bool hardware_counters_available;
++	u64 packets;
++	u64 bytes;
++	u64 reads;
++};
++
++struct fman_offload_snapshot {
++	bool valid;
++	unsigned long cookie;
++	u32 generation;
++	enum fman_offload_exact_class exact_class;
++	enum fman_offload_lifecycle lifecycle;
++	struct fman_offload_binding binding;
++	struct {
++		bool valid;
++		bool keygen_reserved;
++		u8 keygen_scheme_id;
++		u32 hash_result_offset;
++		bool uses_port_private_key;
++	} ingress;
++	struct {
++		bool valid;
++		unsigned int header_len;
++		unsigned int template_len;
++		unsigned long muram_offset;
++		u16 pppoe_len_offset;
++		u16 snat_addr_offset;
++		u16 snat_port_offset;
++		unsigned char src[ETH_ALEN];
++		unsigned char dst[ETH_ALEN];
++		u16 vlan_vid;
++		__be16 vlan_proto;
++		u8 vlan_prio;
++		u16 pppoe_sid;
++		__be16 ppp_proto;
++		__be32 snat_addr;
++		bool snat_port_valid;
++		__be16 snat_port;
++	} hm;
++	struct {
++		bool valid;
++		u8 tx_port_id;
++		u32 qman_channel_id;
++		u32 compiled_out_ifindex;
++		u32 logical_out_ifindex;
++		u32 binding_ifindex;
++	} enqueue;
++	struct {
++		bool valid;
++		bool hardware_counters_available;
++		u64 last_packets;
++		u64 last_bytes;
++		u64 reads;
++	} stats;
++	int last_error;
++	bool live_commit_available;
++};
++
++struct fman_offload_runtime_state {
++	bool ready;
++	bool quiesced;
++	bool live_commit_available;
++	u32 active_flows;
++	u64 prepare_count;
++	u64 prepare_failures;
++	u64 activate_count;
++	u64 activate_unavailable;
++	u64 activate_failures;
++	u64 remove_count;
++	u64 remove_failures;
++	u64 rollback_count;
++	u64 stats_queries;
++	int last_error;
+ };
+ 
+ /* A structure for additional Rx port parameters */
+@@ -139,10 +267,40 @@
+ 
+ int fman_port_del_kg_scheme(struct fman_port *port, u8 scheme_id);
+ 
++int fman_port_reserve_kg_scheme(struct fman_port *port, u8 *scheme_id);
++
++int fman_port_release_kg_scheme(struct fman_port *port, u8 scheme_id);
++
+ int fman_port_get_hash_result_offset(struct fman_port *port, u32 *offset);
+ 
+ int fman_port_get_tstamp(struct fman_port *port, const void *data, u64 *tstamp);
+ 
++int fman_port_offload_get_runtime_state(struct fman_port *port,
++					struct fman_offload_runtime_state
++					*state);
++
++int fman_port_offload_prepare_exact(struct fman_port *rx_port,
++				    struct fman_port *tx_port,
++				    const struct fman_offload_request *req,
++				    struct fman_offload_flow **flow,
++				    struct fman_offload_snapshot *snapshot);
++
++int fman_port_offload_activate(struct fman_offload_flow *flow,
++			       struct fman_offload_snapshot *snapshot);
++
++int fman_port_offload_remove(struct fman_offload_flow *flow,
++			     struct fman_offload_snapshot *snapshot);
++
++int fman_port_offload_get_stats(struct fman_offload_flow *flow,
++				struct fman_offload_stats *stats);
++
++int fman_port_offload_get_snapshot(struct fman_offload_flow *flow,
++				   struct fman_offload_snapshot *snapshot);
++
++int fman_port_offload_quiesce(struct fman_port *port);
++
++int fman_port_offload_resume(struct fman_port *port);
++
+ struct fman_port *fman_port_bind(struct device *dev);
+ 
+ struct device *fman_port_get_device(struct fman_port *port);
+--- a/drivers/net/ethernet/freescale/fman/fman_port.c
++++ b/drivers/net/ethernet/freescale/fman/fman_port.c
+@@ -17,6 +17,7 @@
+ 
+ #include "fman.h"
+ #include "fman_port.h"
++#include "fman_hw_runtime.h"
+ #include "fman_sp.h"
+ #include "fman_keygen.h"
+ 
+@@ -1708,12 +1709,35 @@
+ int fman_port_get_offload_info(struct fman_port *port,
+ 			       struct fman_port_offload_info *info)
+ {
++	struct fman_keygen_state kg_state;
++	bool kg_api_available;
++	int err;
++
+ 	if (!port || !info)
+ 		return -EINVAL;
+ 
++	memset(info, 0, sizeof(*info));
+ 	info->port_id = port->port_id;
+ 	info->kg_hash_enabled = port->kg_hash_enabled;
+ 
++	kg_api_available = port->port_type == FMAN_PORT_TYPE_RX &&
++			   port->dts_params.fman &&
++			   port->dts_params.fman->keygen;
++	if (!kg_api_available)
++		return 0;
++
++	err = keygen_get_state(port->dts_params.fman->keygen, &kg_state);
++	if (err)
++		return err;
++
++	info->kg_scheme_api_available = true;
++	info->kg_scheme_total = kg_state.scheme_total;
++	info->kg_scheme_in_use = kg_state.scheme_in_use;
++	info->kg_scheme_reserved = kg_state.scheme_reserved;
++	info->kg_scheme_free = kg_state.scheme_total -
++			       kg_state.scheme_in_use -
++			       kg_state.scheme_reserved;
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL(fman_port_get_offload_info);
+@@ -1751,6 +1775,38 @@
+ }
+ EXPORT_SYMBOL(fman_port_del_kg_scheme);
+ 
++int fman_port_reserve_kg_scheme(struct fman_port *port, u8 *scheme_id)
++{
++	if (!port || !scheme_id)
++		return -EINVAL;
++
++	if (port->port_type != FMAN_PORT_TYPE_RX)
++		return -EOPNOTSUPP;
++
++	if (!port->dts_params.fman || !port->dts_params.fman->keygen)
++		return -EOPNOTSUPP;
++
++	return keygen_port_scheme_reserve(port->dts_params.fman->keygen,
++					  port->port_id, scheme_id);
++}
++EXPORT_SYMBOL(fman_port_reserve_kg_scheme);
++
++int fman_port_release_kg_scheme(struct fman_port *port, u8 scheme_id)
++{
++	if (!port)
++		return -EINVAL;
++
++	if (port->port_type != FMAN_PORT_TYPE_RX)
++		return -EOPNOTSUPP;
++
++	if (!port->dts_params.fman || !port->dts_params.fman->keygen)
++		return -EOPNOTSUPP;
++
++	return keygen_port_scheme_release(port->dts_params.fman->keygen,
++					  scheme_id);
++}
++EXPORT_SYMBOL(fman_port_release_kg_scheme);
++
+ /**
+  * fman_port_get_device
+  * @port:	Pointer to the FMan port device
+@@ -1788,6 +1844,82 @@
+ }
+ EXPORT_SYMBOL(fman_port_get_tstamp);
+ 
++int fman_port_offload_get_runtime_state(struct fman_port *port,
++					struct fman_offload_runtime_state
++					*state)
++{
++	if (!port || !state || !port->dts_params.fman)
++		return -EINVAL;
++
++	return fman_hw_runtime_get_state(port->dts_params.fman, state);
++}
++EXPORT_SYMBOL(fman_port_offload_get_runtime_state);
++
++int fman_port_offload_prepare_exact(struct fman_port *rx_port,
++				    struct fman_port *tx_port,
++				    const struct fman_offload_request *req,
++				    struct fman_offload_flow **flow,
++				    struct fman_offload_snapshot *snapshot)
++{
++	if (!rx_port || !tx_port || !req || !flow)
++		return -EINVAL;
++
++	if (!rx_port->dts_params.fman ||
++	    rx_port->dts_params.fman != tx_port->dts_params.fman)
++		return -EINVAL;
++
++	return fman_hw_runtime_prepare_exact(rx_port->dts_params.fman,
++					     rx_port, tx_port, req, flow,
++					     snapshot);
++}
++EXPORT_SYMBOL(fman_port_offload_prepare_exact);
++
++int fman_port_offload_activate(struct fman_offload_flow *flow,
++			       struct fman_offload_snapshot *snapshot)
++{
++	return fman_hw_runtime_activate(flow, snapshot);
++}
++EXPORT_SYMBOL(fman_port_offload_activate);
++
++int fman_port_offload_remove(struct fman_offload_flow *flow,
++			     struct fman_offload_snapshot *snapshot)
++{
++	return fman_hw_runtime_remove(flow, snapshot);
++}
++EXPORT_SYMBOL(fman_port_offload_remove);
++
++int fman_port_offload_get_stats(struct fman_offload_flow *flow,
++				struct fman_offload_stats *stats)
++{
++	return fman_hw_runtime_get_stats(flow, stats);
++}
++EXPORT_SYMBOL(fman_port_offload_get_stats);
++
++int fman_port_offload_get_snapshot(struct fman_offload_flow *flow,
++				   struct fman_offload_snapshot *snapshot)
++{
++	return fman_hw_runtime_get_snapshot(flow, snapshot);
++}
++EXPORT_SYMBOL(fman_port_offload_get_snapshot);
++
++int fman_port_offload_quiesce(struct fman_port *port)
++{
++	if (!port || !port->dts_params.fman)
++		return -EINVAL;
++
++	return fman_hw_runtime_quiesce(port->dts_params.fman);
++}
++EXPORT_SYMBOL(fman_port_offload_quiesce);
++
++int fman_port_offload_resume(struct fman_port *port)
++{
++	if (!port || !port->dts_params.fman)
++		return -EINVAL;
++
++	return fman_hw_runtime_resume(port->dts_params.fman);
++}
++EXPORT_SYMBOL(fman_port_offload_resume);
++
+ static int fman_port_probe(struct platform_device *of_dev)
+ {
+ 	struct fman_port *port;
