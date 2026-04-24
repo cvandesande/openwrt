@@ -65,6 +65,27 @@ static void cmmCtFormatIfindex(int ifindex, char *buf, size_t len)
 			snprintf(buf, len, "if%d", ifindex);
 }
 
+static void cmmCtFormatDirBits(unsigned int dir, char *buf, size_t len)
+{
+	size_t used = 0;
+	unsigned int unknown;
+
+	if (!dir) {
+		snprintf(buf, len, "none");
+		return;
+	}
+
+	if (dir & ORIGINATOR)
+		used += snprintf(buf + used, len - used, "orig");
+
+	if (dir & REPLIER)
+		used += snprintf(buf + used, len - used, "%sreply", used ? "+" : "");
+
+	unknown = dir & ~(ORIGINATOR | REPLIER);
+	if (unknown)
+		snprintf(buf + used, len - used, "%s%#x", used ? "+" : "", unknown);
+}
+
 static const char *cmmCtRuntimeStateNameValue(int runtime_state)
 {
 	switch (runtime_state) {
@@ -114,13 +135,52 @@ void cmmCtRuntimeStateSetRejected(struct ctTable *ctEntry, int program_rc)
 
 static void cmmCtRuntimeStateSync(struct ctTable *ctEntry)
 {
+	int expected_dir;
+
 	if (!ctEntry)
 		return;
 
-	if (ctEntry->flags & FPP_PROGRAMMED)
+	expected_dir = ctEntry->dir & ~ctEntry->dir_filter;
+
+	/*
+	 * Stage 3 proof must stay direction-honest: a conntrack is only
+	 * "installed" once every requested direction that was not explicitly
+	 * filtered still has hardware state behind it.
+	 */
+	if ((ctEntry->flags & FPP_PROGRAMMED) && expected_dir &&
+	    ((ctEntry->fpp_dir & expected_dir) == expected_dir))
 		cmmCtRuntimeStateSetInstalled(ctEntry);
 	else
 		cmmCtRuntimeStateSetFallback(ctEntry);
+}
+
+static int cmmCtIngressProgramIfindex(struct nf_conntrack *ct, int iif_attr,
+	int underlying_iif_attr)
+{
+	int iifindex;
+#if defined(LS1043)
+	int underlying_iif;
+	int is_bridge;
+#endif
+
+	if (!ct)
+		return 0;
+
+	iifindex = nfct_get_attr_u32(ct, iif_attr);
+
+#if defined(LS1043)
+	if (!iifindex)
+		return 0;
+
+	is_bridge = __itf_is_bridge(iifindex);
+	if (is_bridge > 0) {
+		underlying_iif = nfct_get_attr_u32(ct, underlying_iif_attr);
+		if (underlying_iif)
+			return underlying_iif;
+	}
+#endif
+
+	return iifindex;
 }
 
 
@@ -281,13 +341,20 @@ int cmmCtShow(struct cli_def * cli, const char *command, char *argv[], int argc)
 	char orig_underlying_iif_name[IF_NAMESIZE];
 	char orig_oif_name[IF_NAMESIZE];
 	char orig_phys_oif_name[IF_NAMESIZE];
+	char rep_oif_name[IF_NAMESIZE];
+	char rep_phys_oif_name[IF_NAMESIZE];
+	char dir_name[32];
+	char fpp_dir_name[32];
+	char dir_filter_name[32];
+	char expected_dir_name[32];
 	char reject_detail[32];
 	int i, cpt = 0, nb_mult_ids = 0;
 	int len;
 	unsigned int timeout = 0, orig_timeout;
 	unsigned int orig_iif, orig_ifindex, orig_underlying_iif, orig_mark;
+	unsigned int expected_dir;
 	unsigned short orig_underlying_vid;
-	int orig_oif, orig_phys_oif;
+	int orig_oif, orig_phys_oif, rep_oif, rep_phys_oif;
 
 	for (i = 0 ; i < CONNTRACK_HASH_TABLE_SIZE; i++)
 	{
@@ -367,25 +434,44 @@ int cmmCtShow(struct cli_def * cli, const char *command, char *argv[], int argc)
 			orig_mark = nfct_get_attr_u32(temp->ct, ATTR_ORIG_COMCERTO_FP_MARK);
 			orig_oif = temp->orig.route ? temp->orig.route->oifindex : 0;
 			orig_phys_oif = temp->orig.route ? temp->orig.route->phys_oifindex : 0;
+			rep_oif = temp->rep.route ? temp->rep.route->oifindex : 0;
+			rep_phys_oif = temp->rep.route ? temp->rep.route->phys_oifindex : 0;
 
 			cmmCtFormatIfindex(orig_iif, orig_iif_name, sizeof(orig_iif_name));
 			cmmCtFormatIfindex(orig_ifindex, orig_ifindex_name, sizeof(orig_ifindex_name));
 			cmmCtFormatIfindex(orig_underlying_iif, orig_underlying_iif_name, sizeof(orig_underlying_iif_name));
 			cmmCtFormatIfindex(orig_oif, orig_oif_name, sizeof(orig_oif_name));
 			cmmCtFormatIfindex(orig_phys_oif, orig_phys_oif_name, sizeof(orig_phys_oif_name));
+			cmmCtFormatIfindex(rep_oif, rep_oif_name, sizeof(rep_oif_name));
+			cmmCtFormatIfindex(rep_phys_oif, rep_phys_oif_name, sizeof(rep_phys_oif_name));
+			expected_dir = temp->dir & ~temp->dir_filter;
+			cmmCtFormatDirBits(temp->dir, dir_name, sizeof(dir_name));
+			cmmCtFormatDirBits(temp->fpp_dir, fpp_dir_name, sizeof(fpp_dir_name));
+			cmmCtFormatDirBits(temp->dir_filter, dir_filter_name, sizeof(dir_filter_name));
+			cmmCtFormatDirBits(expected_dir, expected_dir_name, sizeof(expected_dir_name));
 			reject_detail[0] = '\0';
 
 			if (temp->runtime_state == CMM_CT_RUNTIME_REJECTED)
 				snprintf(reject_detail, sizeof(reject_detail), ", last-fci-rc: %d", temp->last_program_rc);
 
 			cli_print(cli,
-				"%s, Flags: %x, n_id: %d, local-conn: %s, fp-state: %s%s, orig-iif: %s(%u), orig-ifindex: %s(%u), orig-underlying-iif: %s(%u), orig-underlying-vid: %u, orig-mark: %#x, orig-oif: %s(%d), orig-phys-oif: %s(%d)",
+				"%s, Flags: %x, n_id: %d, local-conn: %s, fp-state: %s%s, dir: %s(%#x), expected-dir: %s(%#x), fpp-dir: %s(%#x), dir-filter: %s(%#x), orig-route-id: %#x, rep-route-id: %#x, orig-iif: %s(%u), orig-ifindex: %s(%u), orig-underlying-iif: %s(%u), orig-underlying-vid: %u, orig-mark: %#x, orig-oif: %s(%d), orig-phys-oif: %s(%d), rep-oif: %s(%d), rep-phys-oif: %s(%d)",
 				buf,
 				temp->flags,
 				temp->n_id,
 				((temp->flags & LOCAL_CONN) ? "yes" : "no"),
 				cmmCtRuntimeStateName(temp),
 				reject_detail,
+				dir_name,
+				temp->dir,
+				expected_dir_name,
+				expected_dir,
+				fpp_dir_name,
+				temp->fpp_dir,
+				dir_filter_name,
+				temp->dir_filter,
+				temp->orig.fpp_route_id,
+				temp->rep.fpp_route_id,
 				orig_iif_name,
 				orig_iif,
 				orig_ifindex_name,
@@ -397,7 +483,11 @@ int cmmCtShow(struct cli_def * cli, const char *command, char *argv[], int argc)
 				orig_oif_name,
 				orig_oif,
 				orig_phys_oif_name,
-				orig_phys_oif);
+				orig_phys_oif,
+				rep_oif_name,
+				rep_oif,
+				rep_phys_oif_name,
+				rep_phys_oif);
 
 			if (temp->n_id > 1)
 				nb_mult_ids++;
@@ -471,7 +561,14 @@ static void cmmCtShowResPopulate(FCI_CLIENT *fci_handle, const struct ctTable *c
 	res->orig_mark = nfct_get_attr_u32(ctEntry->ct, ATTR_ORIG_COMCERTO_FP_MARK);
 	res->orig_oif = ctEntry->orig.route ? ctEntry->orig.route->oifindex : 0;
 	res->orig_phys_oif = ctEntry->orig.route ? ctEntry->orig.route->phys_oifindex : 0;
+	res->rep_oif = ctEntry->rep.route ? ctEntry->rep.route->oifindex : 0;
+	res->rep_phys_oif = ctEntry->rep.route ? ctEntry->rep.route->phys_oifindex : 0;
+	res->orig_route_id = ctEntry->orig.fpp_route_id;
+	res->rep_route_id = ctEntry->rep.fpp_route_id;
 	res->local_conn = !!(ctEntry->flags & LOCAL_CONN);
+	res->dir = ctEntry->dir;
+	res->fpp_dir = ctEntry->fpp_dir;
+	res->dir_filter = ctEntry->dir_filter;
 }
 
 int cmmCtShowClientCmd(FCI_CLIENT *fci_handle, u_int8_t *cmd_buf, u_int16_t cmd_len,
@@ -587,7 +684,14 @@ int cmmCtShowProcess(char ** keywords, int tabStart, daemon_handle_t daemon_hand
 	char orig_underlying_iif_name[IF_NAMESIZE];
 	char orig_oif_name[IF_NAMESIZE];
 	char orig_phys_oif_name[IF_NAMESIZE];
+	char rep_oif_name[IF_NAMESIZE];
+	char rep_phys_oif_name[IF_NAMESIZE];
+	char dir_name[32];
+	char fpp_dir_name[32];
+	char dir_filter_name[32];
+	char expected_dir_name[32];
 	char reject_detail[32];
+	unsigned int expected_dir;
 	int rc;
 	int count = 0;
 	int nb_mult_ids = 0;
@@ -631,6 +735,13 @@ int cmmCtShowProcess(char ** keywords, int tabStart, daemon_handle_t daemon_hand
 		cmmCtFormatIfindex(res->orig_underlying_iif, orig_underlying_iif_name, sizeof(orig_underlying_iif_name));
 		cmmCtFormatIfindex(res->orig_oif, orig_oif_name, sizeof(orig_oif_name));
 		cmmCtFormatIfindex(res->orig_phys_oif, orig_phys_oif_name, sizeof(orig_phys_oif_name));
+		cmmCtFormatIfindex(res->rep_oif, rep_oif_name, sizeof(rep_oif_name));
+		cmmCtFormatIfindex(res->rep_phys_oif, rep_phys_oif_name, sizeof(rep_phys_oif_name));
+		expected_dir = res->dir & ~res->dir_filter;
+		cmmCtFormatDirBits(res->dir, dir_name, sizeof(dir_name));
+		cmmCtFormatDirBits(res->fpp_dir, fpp_dir_name, sizeof(fpp_dir_name));
+		cmmCtFormatDirBits(res->dir_filter, dir_filter_name, sizeof(dir_filter_name));
+		cmmCtFormatDirBits(expected_dir, expected_dir_name, sizeof(expected_dir_name));
 		reject_detail[0] = '\0';
 
 		if (res->runtime_state == CMM_CT_RUNTIME_REJECTED)
@@ -638,13 +749,23 @@ int cmmCtShowProcess(char ** keywords, int tabStart, daemon_handle_t daemon_hand
 
 		nfct_snprintf(buf, sizeof(buf), ctTemp, NFCT_T_UNKNOWN, NFCT_O_PLAIN, NFCT_OF_SHOW_LAYER3);
 		cmm_print(DEBUG_STDOUT,
-			"%s, Flags: %x, n_id: %u, local-conn: %s, fp-state: %s%s, orig-iif: %s(%u), orig-ifindex: %s(%u), orig-underlying-iif: %s(%u), orig-underlying-vid: %u, orig-mark: %#x, orig-oif: %s(%d), orig-phys-oif: %s(%d)\n",
+			"%s, Flags: %x, n_id: %u, local-conn: %s, fp-state: %s%s, dir: %s(%#x), expected-dir: %s(%#x), fpp-dir: %s(%#x), dir-filter: %s(%#x), orig-route-id: %#x, rep-route-id: %#x, orig-iif: %s(%u), orig-ifindex: %s(%u), orig-underlying-iif: %s(%u), orig-underlying-vid: %u, orig-mark: %#x, orig-oif: %s(%d), orig-phys-oif: %s(%d), rep-oif: %s(%d), rep-phys-oif: %s(%d)\n",
 			buf,
 			res->flags,
 			res->n_id,
 			res->local_conn ? "yes" : "no",
 			cmmCtRuntimeStateNameValue(res->runtime_state),
 			reject_detail,
+			dir_name,
+			res->dir,
+			expected_dir_name,
+			expected_dir,
+			fpp_dir_name,
+			res->fpp_dir,
+			dir_filter_name,
+			res->dir_filter,
+			res->orig_route_id,
+			res->rep_route_id,
 			orig_iif_name,
 			res->orig_iif,
 			orig_ifindex_name,
@@ -656,7 +777,11 @@ int cmmCtShowProcess(char ** keywords, int tabStart, daemon_handle_t daemon_hand
 			orig_oif_name,
 			res->orig_oif,
 			orig_phys_oif_name,
-			res->orig_phys_oif);
+			res->orig_phys_oif,
+			rep_oif_name,
+			res->rep_oif,
+			rep_phys_oif_name,
+			res->rep_phys_oif);
 
 		count++;
 		if (res->n_id > 1)
@@ -1367,13 +1492,12 @@ err:
 *
 *
 ******************************************************************/
-static int __cmmFPPRouteRegister(struct ct_route *rt, const char *dir)
+static int __cmmFPPRouteRegister(FCI_CLIENT *fci_handle, struct ct_route *rt, const char *dir)
 {
 	const unsigned char *dst_mac;
 	int iifindex;
-
-	if (rt->fpp_route)
-		goto out;
+	int dst_addr_len;
+	const unsigned int *dst_addr;
 
 	if (rt->route->neighEntry)
 		dst_mac = rt->route->neighEntry->macAddr;
@@ -1386,12 +1510,36 @@ static int __cmmFPPRouteRegister(struct ct_route *rt, const char *dir)
 	else
 #endif
 		iifindex = rt->route->iifindex;
-		
+
+	if (rt->route->flow_flags & FLOWFLAG_FLOATING_TUNNEL) {
+		dst_addr = rt->route->dAddr;
+		dst_addr_len = IPADDRLEN(rt->route->family);
+	} else {
+		dst_addr = NULL;
+		dst_addr_len = 0;
+	}
+
+	/*
+	 * Bridge-backed routes can move between physical ports after neighbor/FDB
+	 * refresh. If that happens, drop the stale FE route object before
+	 * reacquiring a matching one so the conntrack cannot keep an old route id.
+	 */
+	if (rt->fpp_route &&
+	    ((rt->fpp_route->oifindex != rt->route->phys_oifindex) ||
+	     (rt->fpp_route->iifindex != iifindex) ||
+	     (rt->fpp_route->underlying_iifindex != rt->route->underlying_iifindex) ||
+	     memcmp(rt->fpp_route->dst_mac, dst_mac, ETH_ALEN) ||
+	     (rt->fpp_route->mtu != rt->route->mtu) ||
+	     (rt->fpp_route->dst_addr_len != dst_addr_len) ||
+	     (dst_addr_len && memcmp(rt->fpp_route->dst_addr, dst_addr, dst_addr_len)))) {
+		__cmmFPPRouteDeregister(fci_handle, rt->fpp_route, dir);
+		rt->fpp_route = NULL;
+	}
 
 	if (rt->route->flow_flags & FLOWFLAG_FLOATING_TUNNEL)
  		rt->fpp_route = __cmmFPPRouteGet(rt->route->phys_oifindex, iifindex, 
 						rt->route->underlying_iifindex, 
-						dst_mac, rt->route->mtu, rt->route->dAddr, IPADDRLEN(rt->route->family));
+						dst_mac, rt->route->mtu, dst_addr, dst_addr_len);
 	else
  		rt->fpp_route = __cmmFPPRouteGet(rt->route->phys_oifindex, iifindex, 
 						rt->route->underlying_iifindex, 
@@ -1413,7 +1561,6 @@ static int __cmmFPPRouteRegister(struct ct_route *rt, const char *dir)
 	rt->fpp_route->underlying_vlan_id = rt->route->underlying_vlan_id;
 #endif
 
-out:
 	return 0;
 
 err:
@@ -1426,7 +1573,7 @@ err:
 *
 *
 ******************************************************************/
-int __cmmRouteRegister(struct ct_route *rt, struct flow *flow, const char *dir)
+int __cmmRouteRegister(FCI_CLIENT *fci_handle, struct ct_route *rt, struct flow *flow, const char *dir)
 {
 	struct ctTable* ctEntry = NULL;
 
@@ -1478,7 +1625,7 @@ getRoute:
 		goto err;
 	}
 
-	if (__cmmFPPRouteRegister(rt, dir) < 0)
+	if (__cmmFPPRouteRegister(fci_handle, rt, dir) < 0)
 	{
 		goto err;
 	}
@@ -1494,7 +1641,7 @@ err:
 *
 *
 ******************************************************************/
-static int __cmmCtTunnelRouteRegister(struct ct_route *rt, struct ct_route *tunnel_rt, unsigned int Daddr4o6, 
+static int __cmmCtTunnelRouteRegister(FCI_CLIENT *fci_handle, struct ct_route *rt, struct ct_route *tunnel_rt, unsigned int Daddr4o6,
 								unsigned int Dport4o6, struct flow *Saflow,
 								const char *dir)
 {
@@ -1566,7 +1713,7 @@ static int __cmmCtTunnelRouteRegister(struct ct_route *rt, struct ct_route *tunn
 	flow.fwmark = 0;
 	flow.underlying_iif = 0;
 
-	if (__cmmRouteRegister(tunnel_rt, &flow, dir) < 0)
+	if (__cmmRouteRegister(fci_handle, tunnel_rt, &flow, dir) < 0)
 		goto err0;
 
 out:
@@ -1820,6 +1967,7 @@ int ____cmmCtRegister(FCI_CLIENT *fci_handle, struct ctTable *ctEntry)
 	int key;
 	int rc;
  	int iif, rep_iif, iif_programmed;
+	int raw_iif, raw_rep_iif;
 	struct interface *itf,*out_itf;
 	struct RtEntry *route;
 	struct SATable *SAEntry = NULL;
@@ -1853,16 +2001,20 @@ int ____cmmCtRegister(FCI_CLIENT *fci_handle, struct ctTable *ctEntry)
 	if (dir & ORIGINATOR)
 	{
 		/* Check if originator packet passed through PRE_ROUTING hook */
-		iif = nfct_get_attr_u32(ct, ATTR_ORIG_COMCERTO_FP_IIF);
-		if (!iif)
+		raw_iif = nfct_get_attr_u32(ct, ATTR_ORIG_COMCERTO_FP_IIF);
+		if (!raw_iif)
 		{
 			ctEntry->flags |= LOCAL_CONN_ORIG;
 			rc = ____cmmCtLocalRegister(fci_handle,ctEntry);
 			goto end;
 		}
 
+		iif = cmmCtIngressProgramIfindex(ct,
+			ATTR_ORIG_COMCERTO_FP_IIF,
+			ATTR_ORIG_COMCERTO_FP_UNDERLYING_IIF);
 
- 		cmm_print(DEBUG_INFO,"orig iif is %x\n", iif);
+		cmm_print(DEBUG_INFO, "orig iif is %x, programmed ingress %x\n",
+			raw_iif, iif);
 
 		/* Check if conntrack is between two fpp interfaces */
 		iif_programmed = __itf_is_programmed(iif);
@@ -1990,7 +2142,7 @@ int ____cmmCtRegister(FCI_CLIENT *fci_handle, struct ctTable *ctEntry)
 		}
 #endif /* IPSEC_FLOW_CACHE */
 
-		if (__cmmRouteRegister(&ctEntry->orig, &flow, "originator") < 0)
+		if (__cmmRouteRegister(fci_handle, &ctEntry->orig, &flow, "originator") < 0)
 		{
 			dir &= ~ORIGINATOR;
 			goto replier;
@@ -2009,8 +2161,8 @@ int ____cmmCtRegister(FCI_CLIENT *fci_handle, struct ctTable *ctEntry)
 		}
 		tmp = ctEntry->orig_tunnel.route;
 
-		rc = __cmmCtTunnelRouteRegister(&ctEntry->orig, &ctEntry->orig_tunnel,dAddrOrig[0], dPortOrig,
-								(SAEntry)? &SAEntry->Sa_flow : NULL, "originator tunnel");
+		rc = __cmmCtTunnelRouteRegister(fci_handle, &ctEntry->orig, &ctEntry->orig_tunnel,dAddrOrig[0], dPortOrig,
+							(SAEntry)? &SAEntry->Sa_flow : NULL, "originator tunnel");
 
 		if (ctEntry->orig_tunnel.route && !tmp)
 		{
@@ -2031,16 +2183,20 @@ replier:
 	{
 		SAEntry = NULL;
 		/* Check if replier packet passed through PRE_ROUTING hook */
-		rep_iif = nfct_get_attr_u32(ct, ATTR_REPL_COMCERTO_FP_IIF);
-		if (!rep_iif)
+		raw_rep_iif = nfct_get_attr_u32(ct, ATTR_REPL_COMCERTO_FP_IIF);
+		if (!raw_rep_iif)
 		{
 			ctEntry->flags |= LOCAL_CONN_REPL;
 			rc = ____cmmCtLocalRegister(fci_handle,ctEntry);
 			goto end;
 		}
 
+		rep_iif = cmmCtIngressProgramIfindex(ct,
+			ATTR_REPL_COMCERTO_FP_IIF,
+			ATTR_REPL_COMCERTO_FP_UNDERLYING_IIF);
 
- 		cmm_print(DEBUG_INFO,"repl iif is %x\n", rep_iif);
+		cmm_print(DEBUG_INFO, "repl iif is %x, programmed ingress %x\n",
+			raw_rep_iif, rep_iif);
 		/* Check if conntrack is between two fpp interfaces */
 		if (!__itf_is_programmed(rep_iif))
 		{
@@ -2116,7 +2272,7 @@ replier:
 		}
 #endif /* IPSEC_FLOW_CACHE */
 
-		if (__cmmRouteRegister(&ctEntry->rep, &flow, "replier") < 0)
+		if (__cmmRouteRegister(fci_handle, &ctEntry->rep, &flow, "replier") < 0)
 		{
 			dir &= ~REPLIER;
 			goto program;
@@ -2124,7 +2280,7 @@ replier:
 
 		tmp = ctEntry->rep_tunnel.route;
 
-		rc = __cmmCtTunnelRouteRegister(&ctEntry->rep, &ctEntry->rep_tunnel, dAddrRepl[0], dPortRepl,
+		rc = __cmmCtTunnelRouteRegister(fci_handle, &ctEntry->rep, &ctEntry->rep_tunnel, dAddrRepl[0], dPortRepl,
 							(SAEntry)? &SAEntry->Sa_flow : NULL, "replier tunnel");
 
 		if (ctEntry->rep_tunnel.route && !tmp)
