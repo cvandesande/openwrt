@@ -378,7 +378,8 @@ err:
 *
 *
 ******************************************************************/
-struct fpp_rt *__cmmFPPRouteFind(int oifindex, int iifindex, const unsigned char *dst_mac, int mtu, const unsigned int *dst_addr, int dst_addr_len)
+struct fpp_rt *__cmmFPPRouteFind(int oifindex, int iifindex, int underlying_iifindex,
+	const unsigned char *dst_mac, int mtu, const unsigned int *dst_addr, int dst_addr_len)
 {
 	struct fpp_rt *route;
 	char mac[MAC_ADDRSTRLEN];
@@ -393,7 +394,8 @@ struct fpp_rt *__cmmFPPRouteFind(int oifindex, int iifindex, const unsigned char
 	while (entry != &fpp_rt_table[key])
 	{
 		route = container_of(entry, struct fpp_rt, list);
-		if (!memcmp(route->dst_mac, dst_mac, ETH_ALEN) && (route->oifindex == oifindex) && (route->iifindex == iifindex) &&
+		if (!memcmp(route->dst_mac, dst_mac, ETH_ALEN) && (route->oifindex == oifindex) &&
+		    (route->iifindex == iifindex) && (route->underlying_iifindex == underlying_iifindex) &&
 		    (route->mtu == mtu) && ((dst_addr_len == route->dst_addr_len) && (!dst_addr_len || !memcmp(route->dst_addr, dst_addr, dst_addr_len))))
 		{
 			goto found;
@@ -505,7 +507,7 @@ struct fpp_rt *__cmmFPPRouteGet(int oifindex, int iifindex, int underlying_iifin
 {
 	struct fpp_rt *route;
 
-	route = __cmmFPPRouteFind(oifindex, iifindex, dst_mac, mtu, dst_addr, dst_addr_len);
+	route = __cmmFPPRouteFind(oifindex, iifindex, underlying_iifindex, dst_mac, mtu, dst_addr, dst_addr_len);
 	if (!route)
 	{
 		route = __cmmFPPRouteAdd(oifindex, iifindex, underlying_iifindex, dst_mac, mtu, dst_addr, dst_addr_len);
