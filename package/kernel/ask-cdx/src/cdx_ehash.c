@@ -1707,6 +1707,7 @@ static int create_pppoe_ins_hm(struct ins_entry_info *info)
 {
 	struct en_ehash_insert_pppoe_hdr *param;	
 	uint32_t word;
+	uint16_t session_id;
 
 	if (info->opc_count == MAX_OPCODES)
 		return FAILURE;
@@ -1732,8 +1733,16 @@ static int create_pppoe_ins_hm(struct ins_entry_info *info)
 #else
 	param->stats_ptr = 0;	
 #endif
+	/*
+	 * devman caches PPPoE session ids in network byte order because the
+	 * control path stores them as on-wire values. Convert back to host
+	 * order before folding the 16-bit session id into the 32-bit header
+	 * template word, otherwise cpu_to_be32() swaps the session bytes a
+	 * second time on little-endian systems.
+	 */
+	session_id = ntohs(info->l2_info.pppoe_sess_id);
 	word = ((PPPoE_VERSION << 28) | (PPPoE_TYPE << 24) | (PPPoE_CODE << 16) | 
-			(info->l2_info.pppoe_sess_id));
+			(session_id));
 	param->word = cpu_to_be32(word);
 	return SUCCESS;
 }
