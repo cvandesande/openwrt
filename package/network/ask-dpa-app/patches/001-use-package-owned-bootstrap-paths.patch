@@ -1,0 +1,21 @@
+--- a/dpa_app-4.03.0/dpa.c
++++ b/dpa_app-4.03.0/dpa.c
+@@ -31,9 +31,13 @@
+ #define MAX_TABLES 	64
+ #define SP_OFFSET 	0x20
+ 
+-//default configuration, pcd and pdl files 
+-#define DEFAULT_CFG_FILE	(char *)"/etc/cdx_cfg.xml"
+-#define DEFAULT_PCD_FILE	(char *)"/etc/cdx_pcd.xml"
+-#define DEFAULT_SP_FILE		(char *)"/etc/cdx_sp.xml"
++/*
++ * These XML assets are board bootstrap data, not mutable runtime config.
++ * Keep them under /usr/share so sysupgrade/overlay state cannot resurrect an
++ * old /etc copy that still describes deferred ports.
++ */
++#define DEFAULT_CFG_FILE	(char *)"/usr/share/ask-dpa-app/cdx_cfg.xml"
++#define DEFAULT_PCD_FILE	(char *)"/usr/share/ask-dpa-app/cdx_pcd.xml"
++#define DEFAULT_SP_FILE		(char *)"/usr/share/ask-dpa-app/cdx_sp.xml"
+ #define DEFAULT_PDL_FILE	(char *)"/etc/fmc/config/hxs_pdl_v3.xml"
+ 
+ //IP reassembly default configuration
