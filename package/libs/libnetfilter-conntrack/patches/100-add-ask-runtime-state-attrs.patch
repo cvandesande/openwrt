@@ -1,0 +1,520 @@
+--- a/include/internal/object.h
++++ b/include/internal/object.h
+@@ -149,6 +149,14 @@
+ 	union __nfct_l4_src 	l4min, l4max;
+ };
+ 
++struct __nfct_comcerto_fp {
++	uint32_t ifindex;
++	uint32_t iif;
++	uint32_t underlying_iif;
++	uint32_t mark;
++	uint16_t underlying_vlan_id;
++};
++
+ struct nfct_tuple_head {
+ 	struct __nfct_tuple 	orig;
+ 
+@@ -178,6 +186,7 @@
+ 	struct __nfct_counters 	counters[__DIR_MAX];
+ 	struct __nfct_nat 	snat;
+ 	struct __nfct_nat 	dnat;
++	struct __nfct_comcerto_fp fp_info[__DIR_MAX];
+ 
+ 	struct {
+ 		uint32_t 	correction_pos;
+--- a/include/libnetfilter_conntrack/libnetfilter_conntrack.h
++++ b/include/libnetfilter_conntrack/libnetfilter_conntrack.h
+@@ -144,6 +144,16 @@
+ 	ATTR_SYNPROXY_ISN = 72,			/* u32 bits */
+ 	ATTR_SYNPROXY_ITS,			/* u32 bits */
+ 	ATTR_SYNPROXY_TSOFF,			/* u32 bits */
++	ATTR_ORIG_COMCERTO_FP_IIF,		/* u32 bits */
++	ATTR_ORIG_COMCERTO_FP_IFINDEX,		/* u32 bits */
++	ATTR_ORIG_COMCERTO_FP_MARK,		/* u32 bits */
++	ATTR_REPL_COMCERTO_FP_IIF,		/* u32 bits */
++	ATTR_REPL_COMCERTO_FP_IFINDEX,		/* u32 bits */
++	ATTR_REPL_COMCERTO_FP_MARK,		/* u32 bits */
++	ATTR_ORIG_COMCERTO_FP_UNDERLYING_IIF,	/* u32 bits */
++	ATTR_REPL_COMCERTO_FP_UNDERLYING_IIF,	/* u32 bits */
++	ATTR_ORIG_COMCERTO_FP_UNDERLYING_VID,	/* u16 bits */
++	ATTR_REPL_COMCERTO_FP_UNDERLYING_VID,	/* u16 bits */
+ 	ATTR_MAX
+ };
+ 
+@@ -218,6 +228,7 @@
+ /* constructor / destructor */
+ extern struct nf_conntrack *nfct_new(void);
+ extern void nfct_destroy(struct nf_conntrack *ct);
++extern void nfct_clear(struct nf_conntrack *ct);
+ 
+ /* clone */
+ struct nf_conntrack *nfct_clone(const struct nf_conntrack *ct);
+--- a/include/libnetfilter_conntrack/linux_nf_conntrack_common.h
++++ b/include/libnetfilter_conntrack/linux_nf_conntrack_common.h
+@@ -123,6 +123,10 @@
+ 	IPS_HW_OFFLOAD_BIT = 15,
+ 	IPS_HW_OFFLOAD = (1 << IPS_HW_OFFLOAD_BIT),
+ 
++	/* Fast-path control plane latched this conntrack as installed. */
++	IPS_PERMANENT_BIT = 16,
++	IPS_PERMANENT = (1 << IPS_PERMANENT_BIT),
++
+ 	/* Be careful here, modifying these bits can make things messy,
+ 	 * so don't let users modify them directly.
+ 	 */
+@@ -131,7 +135,7 @@
+ 				 IPS_SEQ_ADJUST | IPS_TEMPLATE | IPS_UNTRACKED |
+ 				 IPS_OFFLOAD | IPS_HW_OFFLOAD),
+ 
+-	__IPS_MAX_BIT = 16,
++	__IPS_MAX_BIT = 17,
+ };
+ 
+ /* Connection tracking event types */
+--- a/include/libnetfilter_conntrack/linux_nfnetlink_conntrack.h
++++ b/include/libnetfilter_conntrack/linux_nfnetlink_conntrack.h
+@@ -60,10 +60,23 @@
+ 	CTA_SYNPROXY,
+ 	CTA_FILTER,
+ 	CTA_STATUS_MASK,
++	CTA_LAYERSCAPE_FP_ORIG,
++	CTA_LAYERSCAPE_FP_REPLY,
+ 	__CTA_MAX
+ };
+ #define CTA_MAX (__CTA_MAX - 1)
+ 
++enum ctattr_comcerto_fp {
++	CTA_COMCERTO_FP_UNSPEC,
++	CTA_COMCERTO_FP_MARK,
++	CTA_COMCERTO_FP_IFINDEX,
++	CTA_COMCERTO_FP_IIF,
++	CTA_COMCERTO_FP_UNDERLYING_IIF,
++	CTA_COMCERTO_FP_UNDERLYING_VID,
++	__CTA_COMCERTO_FP_MAX
++};
++#define CTA_COMCERTO_FP_MAX (__CTA_COMCERTO_FP_MAX - 1)
++
+ enum ctattr_tuple {
+ 	CTA_TUPLE_UNSPEC,
+ 	CTA_TUPLE_IP,
+--- a/src/conntrack/api.c
++++ b/src/conntrack/api.c
+@@ -105,6 +105,30 @@
+ 	ct = NULL; /* bugtrap */
+ }
+ 
++void nfct_clear(struct nf_conntrack *ct)
++{
++	assert(ct != NULL);
++	if (ct->secctx) {
++		free(ct->secctx);
++		ct->secctx = NULL;
++	}
++	if (ct->helper_info) {
++		free(ct->helper_info);
++		ct->helper_info = NULL;
++		ct->helper_info_len = 0;
++	}
++	if (ct->connlabels) {
++		nfct_bitmask_destroy(ct->connlabels);
++		ct->connlabels = NULL;
++	}
++	if (ct->connlabels_mask) {
++		nfct_bitmask_destroy(ct->connlabels_mask);
++		ct->connlabels_mask = NULL;
++	}
++
++	memset(ct, 0, sizeof(*ct));
++}
++
+ /**
+  * nf_sizeof - return the size in bytes of a certain conntrack object
+  * \param ct pointer to the conntrack object
+--- a/src/conntrack/copy.c
++++ b/src/conntrack/copy.c
+@@ -516,6 +516,70 @@
+ 	dest->synproxy.tsoff = orig->synproxy.tsoff;
+ }
+ 
++static void copy_attr_orig_comcerto_fp_iif(struct nf_conntrack *dest,
++					   const struct nf_conntrack *orig)
++{
++	dest->fp_info[__DIR_ORIG].iif = orig->fp_info[__DIR_ORIG].iif;
++}
++
++static void copy_attr_orig_comcerto_fp_ifindex(struct nf_conntrack *dest,
++					       const struct nf_conntrack *orig)
++{
++	dest->fp_info[__DIR_ORIG].ifindex = orig->fp_info[__DIR_ORIG].ifindex;
++}
++
++static void copy_attr_orig_comcerto_fp_mark(struct nf_conntrack *dest,
++					    const struct nf_conntrack *orig)
++{
++	dest->fp_info[__DIR_ORIG].mark = orig->fp_info[__DIR_ORIG].mark;
++}
++
++static void copy_attr_repl_comcerto_fp_iif(struct nf_conntrack *dest,
++					   const struct nf_conntrack *orig)
++{
++	dest->fp_info[__DIR_REPL].iif = orig->fp_info[__DIR_REPL].iif;
++}
++
++static void copy_attr_repl_comcerto_fp_ifindex(struct nf_conntrack *dest,
++					       const struct nf_conntrack *orig)
++{
++	dest->fp_info[__DIR_REPL].ifindex = orig->fp_info[__DIR_REPL].ifindex;
++}
++
++static void copy_attr_repl_comcerto_fp_mark(struct nf_conntrack *dest,
++					    const struct nf_conntrack *orig)
++{
++	dest->fp_info[__DIR_REPL].mark = orig->fp_info[__DIR_REPL].mark;
++}
++
++static void copy_attr_orig_comcerto_fp_underlying_iif(struct nf_conntrack *dest,
++						      const struct nf_conntrack *orig)
++{
++	dest->fp_info[__DIR_ORIG].underlying_iif =
++		orig->fp_info[__DIR_ORIG].underlying_iif;
++}
++
++static void copy_attr_repl_comcerto_fp_underlying_iif(struct nf_conntrack *dest,
++						      const struct nf_conntrack *orig)
++{
++	dest->fp_info[__DIR_REPL].underlying_iif =
++		orig->fp_info[__DIR_REPL].underlying_iif;
++}
++
++static void copy_attr_orig_comcerto_fp_underlying_vid(struct nf_conntrack *dest,
++						      const struct nf_conntrack *orig)
++{
++	dest->fp_info[__DIR_ORIG].underlying_vlan_id =
++		orig->fp_info[__DIR_ORIG].underlying_vlan_id;
++}
++
++static void copy_attr_repl_comcerto_fp_underlying_vid(struct nf_conntrack *dest,
++						      const struct nf_conntrack *orig)
++{
++	dest->fp_info[__DIR_REPL].underlying_vlan_id =
++		orig->fp_info[__DIR_REPL].underlying_vlan_id;
++}
++
+ const copy_attr copy_attr_array[ATTR_MAX] = {
+ 	[ATTR_ORIG_IPV4_SRC]		= copy_attr_orig_ipv4_src,
+ 	[ATTR_ORIG_IPV4_DST] 		= copy_attr_orig_ipv4_dst,
+@@ -592,6 +656,16 @@
+ 	[ATTR_SYNPROXY_ITS]		= copy_attr_synproxy_its,
+ 	[ATTR_SYNPROXY_ISN]		= copy_attr_synproxy_isn,
+ 	[ATTR_SYNPROXY_TSOFF]		= copy_attr_synproxy_tsoff,
++	[ATTR_ORIG_COMCERTO_FP_IIF]	= copy_attr_orig_comcerto_fp_iif,
++	[ATTR_ORIG_COMCERTO_FP_IFINDEX]	= copy_attr_orig_comcerto_fp_ifindex,
++	[ATTR_ORIG_COMCERTO_FP_MARK]	= copy_attr_orig_comcerto_fp_mark,
++	[ATTR_REPL_COMCERTO_FP_IIF]	= copy_attr_repl_comcerto_fp_iif,
++	[ATTR_REPL_COMCERTO_FP_IFINDEX]	= copy_attr_repl_comcerto_fp_ifindex,
++	[ATTR_REPL_COMCERTO_FP_MARK]	= copy_attr_repl_comcerto_fp_mark,
++	[ATTR_ORIG_COMCERTO_FP_UNDERLYING_IIF] = copy_attr_orig_comcerto_fp_underlying_iif,
++	[ATTR_REPL_COMCERTO_FP_UNDERLYING_IIF] = copy_attr_repl_comcerto_fp_underlying_iif,
++	[ATTR_ORIG_COMCERTO_FP_UNDERLYING_VID] = copy_attr_orig_comcerto_fp_underlying_vid,
++	[ATTR_REPL_COMCERTO_FP_UNDERLYING_VID] = copy_attr_repl_comcerto_fp_underlying_vid,
+ };
+ 
+ /* this is used by nfct_copy() with the NFCT_CP_OVERRIDE flag set. */
+--- a/src/conntrack/getter.c
++++ b/src/conntrack/getter.c
+@@ -384,6 +384,56 @@
+ 	return &ct->synproxy.tsoff;
+ }
+ 
++static const void *get_attr_orig_comcerto_fp_iif(const struct nf_conntrack *ct)
++{
++	return &ct->fp_info[__DIR_ORIG].iif;
++}
++
++static const void *get_attr_orig_comcerto_fp_ifindex(const struct nf_conntrack *ct)
++{
++	return &ct->fp_info[__DIR_ORIG].ifindex;
++}
++
++static const void *get_attr_orig_comcerto_fp_mark(const struct nf_conntrack *ct)
++{
++	return &ct->fp_info[__DIR_ORIG].mark;
++}
++
++static const void *get_attr_repl_comcerto_fp_iif(const struct nf_conntrack *ct)
++{
++	return &ct->fp_info[__DIR_REPL].iif;
++}
++
++static const void *get_attr_repl_comcerto_fp_ifindex(const struct nf_conntrack *ct)
++{
++	return &ct->fp_info[__DIR_REPL].ifindex;
++}
++
++static const void *get_attr_repl_comcerto_fp_mark(const struct nf_conntrack *ct)
++{
++	return &ct->fp_info[__DIR_REPL].mark;
++}
++
++static const void *get_attr_orig_comcerto_fp_underlying_iif(const struct nf_conntrack *ct)
++{
++	return &ct->fp_info[__DIR_ORIG].underlying_iif;
++}
++
++static const void *get_attr_repl_comcerto_fp_underlying_iif(const struct nf_conntrack *ct)
++{
++	return &ct->fp_info[__DIR_REPL].underlying_iif;
++}
++
++static const void *get_attr_orig_comcerto_fp_underlying_vid(const struct nf_conntrack *ct)
++{
++	return &ct->fp_info[__DIR_ORIG].underlying_vlan_id;
++}
++
++static const void *get_attr_repl_comcerto_fp_underlying_vid(const struct nf_conntrack *ct)
++{
++	return &ct->fp_info[__DIR_REPL].underlying_vlan_id;
++}
++
+ const get_attr get_attr_array[ATTR_MAX] = {
+ 	[ATTR_ORIG_IPV4_SRC]		= get_attr_orig_ipv4_src,
+ 	[ATTR_ORIG_IPV4_DST] 		= get_attr_orig_ipv4_dst,
+@@ -460,4 +510,14 @@
+ 	[ATTR_SYNPROXY_ISN]		= get_attr_synproxy_isn,
+ 	[ATTR_SYNPROXY_ITS]		= get_attr_synproxy_its,
+ 	[ATTR_SYNPROXY_TSOFF]		= get_attr_synproxy_tsoff,
++	[ATTR_ORIG_COMCERTO_FP_IIF]	= get_attr_orig_comcerto_fp_iif,
++	[ATTR_ORIG_COMCERTO_FP_IFINDEX]	= get_attr_orig_comcerto_fp_ifindex,
++	[ATTR_ORIG_COMCERTO_FP_MARK]	= get_attr_orig_comcerto_fp_mark,
++	[ATTR_REPL_COMCERTO_FP_IIF]	= get_attr_repl_comcerto_fp_iif,
++	[ATTR_REPL_COMCERTO_FP_IFINDEX]	= get_attr_repl_comcerto_fp_ifindex,
++	[ATTR_REPL_COMCERTO_FP_MARK]	= get_attr_repl_comcerto_fp_mark,
++	[ATTR_ORIG_COMCERTO_FP_UNDERLYING_IIF] = get_attr_orig_comcerto_fp_underlying_iif,
++	[ATTR_REPL_COMCERTO_FP_UNDERLYING_IIF] = get_attr_repl_comcerto_fp_underlying_iif,
++	[ATTR_ORIG_COMCERTO_FP_UNDERLYING_VID] = get_attr_orig_comcerto_fp_underlying_vid,
++	[ATTR_REPL_COMCERTO_FP_UNDERLYING_VID] = get_attr_repl_comcerto_fp_underlying_vid,
+ };
+--- a/src/conntrack/parse_mnl.c
++++ b/src/conntrack/parse_mnl.c
+@@ -857,6 +857,108 @@
+ }
+ 
+ static int
++nfct_parse_comcerto_fp_attr_cb(const struct nlattr *attr, void *data)
++{
++	const struct nlattr **tb = data;
++	int type = mnl_attr_get_type(attr);
++
++	if (mnl_attr_type_valid(attr, CTA_COMCERTO_FP_MAX) < 0)
++		return MNL_CB_OK;
++
++	switch (type) {
++	case CTA_COMCERTO_FP_MARK:
++	case CTA_COMCERTO_FP_IFINDEX:
++	case CTA_COMCERTO_FP_IIF:
++	case CTA_COMCERTO_FP_UNDERLYING_IIF:
++		if (mnl_attr_validate(attr, MNL_TYPE_U32) < 0)
++			abi_breakage();
++		break;
++	case CTA_COMCERTO_FP_UNDERLYING_VID:
++		if (mnl_attr_validate(attr, MNL_TYPE_U16) < 0)
++			abi_breakage();
++		break;
++	}
++
++	tb[type] = attr;
++	return MNL_CB_OK;
++}
++
++static int
++nfct_parse_comcerto_fp(const struct nlattr *attr, struct nf_conntrack *ct,
++		       int dir)
++{
++	struct nlattr *tb[CTA_COMCERTO_FP_MAX + 1] = {};
++
++	if (mnl_attr_parse_nested(attr, nfct_parse_comcerto_fp_attr_cb, tb) < 0)
++		return -1;
++
++	if (tb[CTA_COMCERTO_FP_IIF]) {
++		ct->fp_info[dir].iif = mnl_attr_get_u32(tb[CTA_COMCERTO_FP_IIF]);
++		switch (dir) {
++		case __DIR_ORIG:
++			set_bit(ATTR_ORIG_COMCERTO_FP_IIF, ct->head.set);
++			break;
++		case __DIR_REPL:
++			set_bit(ATTR_REPL_COMCERTO_FP_IIF, ct->head.set);
++			break;
++		}
++	}
++
++	if (tb[CTA_COMCERTO_FP_IFINDEX]) {
++		ct->fp_info[dir].ifindex =
++			mnl_attr_get_u32(tb[CTA_COMCERTO_FP_IFINDEX]);
++		switch (dir) {
++		case __DIR_ORIG:
++			set_bit(ATTR_ORIG_COMCERTO_FP_IFINDEX, ct->head.set);
++			break;
++		case __DIR_REPL:
++			set_bit(ATTR_REPL_COMCERTO_FP_IFINDEX, ct->head.set);
++			break;
++		}
++	}
++
++	if (tb[CTA_COMCERTO_FP_MARK]) {
++		ct->fp_info[dir].mark = mnl_attr_get_u32(tb[CTA_COMCERTO_FP_MARK]);
++		switch (dir) {
++		case __DIR_ORIG:
++			set_bit(ATTR_ORIG_COMCERTO_FP_MARK, ct->head.set);
++			break;
++		case __DIR_REPL:
++			set_bit(ATTR_REPL_COMCERTO_FP_MARK, ct->head.set);
++			break;
++		}
++	}
++
++	if (tb[CTA_COMCERTO_FP_UNDERLYING_IIF]) {
++		ct->fp_info[dir].underlying_iif =
++			mnl_attr_get_u32(tb[CTA_COMCERTO_FP_UNDERLYING_IIF]);
++		switch (dir) {
++		case __DIR_ORIG:
++			set_bit(ATTR_ORIG_COMCERTO_FP_UNDERLYING_IIF, ct->head.set);
++			break;
++		case __DIR_REPL:
++			set_bit(ATTR_REPL_COMCERTO_FP_UNDERLYING_IIF, ct->head.set);
++			break;
++		}
++	}
++
++	if (tb[CTA_COMCERTO_FP_UNDERLYING_VID]) {
++		ct->fp_info[dir].underlying_vlan_id =
++			mnl_attr_get_u16(tb[CTA_COMCERTO_FP_UNDERLYING_VID]);
++		switch (dir) {
++		case __DIR_ORIG:
++			set_bit(ATTR_ORIG_COMCERTO_FP_UNDERLYING_VID, ct->head.set);
++			break;
++		case __DIR_REPL:
++			set_bit(ATTR_REPL_COMCERTO_FP_UNDERLYING_VID, ct->head.set);
++			break;
++		}
++	}
++
++	return 0;
++}
++
++static int
+ nfct_parse_conntrack_attr_cb(const struct nlattr *attr, void *data)
+ {
+ 	const struct nlattr **tb = data;
+@@ -877,6 +979,8 @@
+ 	case CTA_HELP:
+ 	case CTA_SECCTX:
+ 	case CTA_TIMESTAMP:
++	case CTA_LAYERSCAPE_FP_ORIG:
++	case CTA_LAYERSCAPE_FP_REPLY:
+ 		if (mnl_attr_validate(attr, MNL_TYPE_NESTED) < 0)
+ 			abi_breakage();
+ 		break;
+@@ -1029,6 +1133,18 @@
+ 			return -1;
+ 	}
+ 
++	if (tb[CTA_LAYERSCAPE_FP_ORIG]) {
++		if (nfct_parse_comcerto_fp(tb[CTA_LAYERSCAPE_FP_ORIG], ct,
++					   __DIR_ORIG) < 0)
++			return -1;
++	}
++
++	if (tb[CTA_LAYERSCAPE_FP_REPLY]) {
++		if (nfct_parse_comcerto_fp(tb[CTA_LAYERSCAPE_FP_REPLY], ct,
++					   __DIR_REPL) < 0)
++			return -1;
++	}
++
+ 	return 0;
+ }
+ 
+--- a/src/conntrack/setter.c
++++ b/src/conntrack/setter.c
+@@ -458,6 +458,66 @@
+ }
+ 
+ static void
++set_attr_orig_comcerto_fp_iif(struct nf_conntrack *ct, const void *value, size_t len)
++{
++	ct->fp_info[__DIR_ORIG].iif = *((uint32_t *) value);
++}
++
++static void
++set_attr_orig_comcerto_fp_ifindex(struct nf_conntrack *ct, const void *value, size_t len)
++{
++	ct->fp_info[__DIR_ORIG].ifindex = *((uint32_t *) value);
++}
++
++static void
++set_attr_orig_comcerto_fp_mark(struct nf_conntrack *ct, const void *value, size_t len)
++{
++	ct->fp_info[__DIR_ORIG].mark = *((uint32_t *) value);
++}
++
++static void
++set_attr_repl_comcerto_fp_iif(struct nf_conntrack *ct, const void *value, size_t len)
++{
++	ct->fp_info[__DIR_REPL].iif = *((uint32_t *) value);
++}
++
++static void
++set_attr_repl_comcerto_fp_ifindex(struct nf_conntrack *ct, const void *value, size_t len)
++{
++	ct->fp_info[__DIR_REPL].ifindex = *((uint32_t *) value);
++}
++
++static void
++set_attr_repl_comcerto_fp_mark(struct nf_conntrack *ct, const void *value, size_t len)
++{
++	ct->fp_info[__DIR_REPL].mark = *((uint32_t *) value);
++}
++
++static void
++set_attr_orig_comcerto_fp_underlying_iif(struct nf_conntrack *ct, const void *value, size_t len)
++{
++	ct->fp_info[__DIR_ORIG].underlying_iif = *((uint32_t *) value);
++}
++
++static void
++set_attr_repl_comcerto_fp_underlying_iif(struct nf_conntrack *ct, const void *value, size_t len)
++{
++	ct->fp_info[__DIR_REPL].underlying_iif = *((uint32_t *) value);
++}
++
++static void
++set_attr_orig_comcerto_fp_underlying_vid(struct nf_conntrack *ct, const void *value, size_t len)
++{
++	ct->fp_info[__DIR_ORIG].underlying_vlan_id = *((uint16_t *) value);
++}
++
++static void
++set_attr_repl_comcerto_fp_underlying_vid(struct nf_conntrack *ct, const void *value, size_t len)
++{
++	ct->fp_info[__DIR_REPL].underlying_vlan_id = *((uint16_t *) value);
++}
++
++static void
+ set_attr_do_nothing(struct nf_conntrack *ct, const void *value, size_t len) {}
+ 
+ const set_attr set_attr_array[ATTR_MAX] = {
+@@ -536,4 +596,14 @@
+ 	[ATTR_SYNPROXY_ISN]	= set_attr_synproxy_isn,
+ 	[ATTR_SYNPROXY_ITS]	= set_attr_synproxy_its,
+ 	[ATTR_SYNPROXY_TSOFF]	= set_attr_synproxy_tsoff,
++	[ATTR_ORIG_COMCERTO_FP_IIF] = set_attr_orig_comcerto_fp_iif,
++	[ATTR_ORIG_COMCERTO_FP_IFINDEX] = set_attr_orig_comcerto_fp_ifindex,
++	[ATTR_ORIG_COMCERTO_FP_MARK] = set_attr_orig_comcerto_fp_mark,
++	[ATTR_REPL_COMCERTO_FP_IIF] = set_attr_repl_comcerto_fp_iif,
++	[ATTR_REPL_COMCERTO_FP_IFINDEX] = set_attr_repl_comcerto_fp_ifindex,
++	[ATTR_REPL_COMCERTO_FP_MARK] = set_attr_repl_comcerto_fp_mark,
++	[ATTR_ORIG_COMCERTO_FP_UNDERLYING_IIF] = set_attr_orig_comcerto_fp_underlying_iif,
++	[ATTR_REPL_COMCERTO_FP_UNDERLYING_IIF] = set_attr_repl_comcerto_fp_underlying_iif,
++	[ATTR_ORIG_COMCERTO_FP_UNDERLYING_VID] = set_attr_orig_comcerto_fp_underlying_vid,
++	[ATTR_REPL_COMCERTO_FP_UNDERLYING_VID] = set_attr_repl_comcerto_fp_underlying_vid,
+ };
