@@ -1,0 +1,212 @@
+--- a/include/net/netfilter/nf_conntrack.h
++++ b/include/net/netfilter/nf_conntrack.h
+@@ -72,6 +72,14 @@
+ #include <net/netfilter/ipv4/nf_conntrack_ipv4.h>
+ #include <net/netfilter/ipv6/nf_conntrack_ipv6.h>
+ 
++struct comcerto_fp_info {
++	int ifindex;
++	int iif;
++	int underlying_iif;
++	u32 mark;
++	u16 underlying_vlan_id;
++};
++
+ struct nf_conn {
+ 	/* Usage count in here is 1 for hash table, 1 per skb,
+ 	 * plus 1 for any connection(s) we are `master' for
+@@ -118,6 +126,8 @@
+ 	u_int32_t secmark;
+ #endif
+ 
++	struct comcerto_fp_info fp_info[IP_CT_DIR_MAX];
++
+ 	/* Extensions */
+ 	struct nf_ct_ext *ext;
+ 
+--- a/include/uapi/linux/netfilter/nf_conntrack_common.h
++++ b/include/uapi/linux/netfilter/nf_conntrack_common.h
+@@ -118,6 +118,10 @@
+ 	IPS_HW_OFFLOAD_BIT = 15,
+ 	IPS_HW_OFFLOAD = (1 << IPS_HW_OFFLOAD_BIT),
+ 
++	/* Fast-path control plane latched this conntrack as installed. */
++	IPS_PERMANENT_BIT = 16,
++	IPS_PERMANENT = (1 << IPS_PERMANENT_BIT),
++
+ 	/* Be careful here, modifying these bits can make things messy,
+ 	 * so don't let users modify them directly.
+ 	 */
+@@ -126,7 +130,7 @@
+ 				 IPS_SEQ_ADJUST | IPS_TEMPLATE | IPS_UNTRACKED |
+ 				 IPS_OFFLOAD | IPS_HW_OFFLOAD),
+ 
+-	__IPS_MAX_BIT = 16,
++	__IPS_MAX_BIT = 17,
+ };
+ 
+ /* Connection tracking event types */
+--- a/include/uapi/linux/netfilter/nfnetlink_conntrack.h
++++ b/include/uapi/linux/netfilter/nfnetlink_conntrack.h
+@@ -57,10 +57,23 @@
+ 	CTA_SYNPROXY,
+ 	CTA_FILTER,
+ 	CTA_STATUS_MASK,
++	CTA_LAYERSCAPE_FP_ORIG,
++	CTA_LAYERSCAPE_FP_REPLY,
+ 	__CTA_MAX
+ };
+ #define CTA_MAX (__CTA_MAX - 1)
+ 
++enum ctattr_comcerto_fp {
++	CTA_COMCERTO_FP_UNSPEC,
++	CTA_COMCERTO_FP_MARK,
++	CTA_COMCERTO_FP_IFINDEX,
++	CTA_COMCERTO_FP_IIF,
++	CTA_COMCERTO_FP_UNDERLYING_IIF,
++	CTA_COMCERTO_FP_UNDERLYING_VID,
++	__CTA_COMCERTO_FP_MAX
++};
++#define CTA_COMCERTO_FP_MAX (__CTA_COMCERTO_FP_MAX - 1)
++
+ enum ctattr_tuple {
+ 	CTA_TUPLE_UNSPEC,
+ 	CTA_TUPLE_IP,
+--- a/net/netfilter/nf_conntrack_core.c
++++ b/net/netfilter/nf_conntrack_core.c
+@@ -28,6 +28,7 @@
+ #include <linux/notifier.h>
+ #include <linux/kernel.h>
+ #include <linux/netdevice.h>
++#include <linux/if_vlan.h>
+ #include <linux/socket.h>
+ #include <linux/mm.h>
+ #include <linux/nsproxy.h>
+@@ -2014,6 +2015,40 @@
+ 	return generic_packet(ct, skb, ctinfo);
+ }
+ 
++static void nf_ct_update_layerscape_fp(struct nf_conn *ct,
++				       enum ip_conntrack_info ctinfo,
++				       const struct sk_buff *skb)
++{
++	struct comcerto_fp_info *fp_info;
++	const struct net_device *dev;
++	int underlying_iif;
++
++	dev = skb->dev;
++	if (!dev)
++		return;
++
++	fp_info = &ct->fp_info[CTINFO2DIR(ctinfo)];
++	fp_info->mark = skb->mark;
++	fp_info->ifindex = dev->ifindex;
++	fp_info->iif = skb->skb_iif ? skb->skb_iif : dev->ifindex;
++	underlying_iif = skb->layerscape_underlying_iif ?
++		skb->layerscape_underlying_iif : dev->ifindex;
++
++	if (is_vlan_dev(dev)) {
++		const struct net_device *real_dev = vlan_dev_real_dev(dev);
++
++		fp_info->underlying_iif = underlying_iif ?
++			underlying_iif :
++			(real_dev ? real_dev->ifindex : dev->ifindex);
++		fp_info->underlying_vlan_id = vlan_dev_vlan_id(dev);
++		return;
++	}
++
++	fp_info->underlying_iif = underlying_iif;
++	fp_info->underlying_vlan_id = skb_vlan_tag_present(skb) ?
++		skb_vlan_tag_get_id(skb) : 0;
++}
++
+ unsigned int
+ nf_conntrack_in(struct sk_buff *skb, const struct nf_hook_state *state)
+ {
+@@ -2089,6 +2124,8 @@
+ 		goto out;
+ 	}
+ 
++	nf_ct_update_layerscape_fp(ct, ctinfo, skb);
++
+ 	if (ctinfo == IP_CT_ESTABLISHED_REPLY &&
+ 	    !test_and_set_bit(IPS_SEEN_REPLY_BIT, &ct->status))
+ 		nf_conntrack_event_cache(IPCT_REPLY, ct);
+--- a/net/netfilter/nf_conntrack_netlink.c
++++ b/net/netfilter/nf_conntrack_netlink.c
+@@ -353,6 +358,47 @@
+ #define ctnetlink_dump_mark(a, b, c) (0)
+ #endif
+ 
++static int ctnetlink_dump_layerscape_fp_dir(struct sk_buff *skb,
++					    const struct comcerto_fp_info *fp_info,
++					    u16 attr)
++{
++	struct nlattr *nest_parms;
++
++	nest_parms = nla_nest_start(skb, attr);
++	if (!nest_parms)
++		return -1;
++
++	if (nla_put_u32(skb, CTA_COMCERTO_FP_MARK, fp_info->mark) ||
++	    nla_put_u32(skb, CTA_COMCERTO_FP_IFINDEX, fp_info->ifindex) ||
++	    nla_put_u32(skb, CTA_COMCERTO_FP_IIF, fp_info->iif) ||
++	    nla_put_u32(skb, CTA_COMCERTO_FP_UNDERLYING_IIF,
++			fp_info->underlying_iif) ||
++	    nla_put_u16(skb, CTA_COMCERTO_FP_UNDERLYING_VID,
++			fp_info->underlying_vlan_id))
++		goto nla_put_failure;
++
++	nla_nest_end(skb, nest_parms);
++	return 0;
++
++nla_put_failure:
++	nla_nest_cancel(skb, nest_parms);
++	return -1;
++}
++
++static int ctnetlink_dump_layerscape_fp(struct sk_buff *skb,
++					const struct nf_conn *ct)
++{
++	if (ctnetlink_dump_layerscape_fp_dir(skb,
++					     &ct->fp_info[IP_CT_DIR_ORIGINAL],
++					     CTA_LAYERSCAPE_FP_ORIG) < 0 ||
++	    ctnetlink_dump_layerscape_fp_dir(skb,
++					     &ct->fp_info[IP_CT_DIR_REPLY],
++					     CTA_LAYERSCAPE_FP_REPLY) < 0)
++		return -1;
++
++	return 0;
++}
++
+ #ifdef CONFIG_NF_CONNTRACK_SECMARK
+ static int ctnetlink_dump_secctx(struct sk_buff *skb, const struct nf_conn *ct)
+ {
+@@ -553,6 +599,7 @@
+ {
+ 	if (ctnetlink_dump_status(skb, ct) < 0 ||
+ 	    ctnetlink_dump_mark(skb, ct, true) < 0 ||
++	    ctnetlink_dump_layerscape_fp(skb, ct) < 0 ||
+ 	    ctnetlink_dump_secctx(skb, ct) < 0 ||
+ 	    ctnetlink_dump_id(skb, ct) < 0 ||
+ 	    ctnetlink_dump_use(skb, ct) < 0 ||
+@@ -704,6 +751,9 @@
+ 	       + nla_total_size(sizeof(u_int32_t)) /* CTA_TIMEOUT */
+ 	       + nla_total_size(0) /* CTA_PROTOINFO */
+ 	       + nla_total_size(0) /* CTA_HELP */
++	       + 2 * nla_total_size(0) /* CTA_LAYERSCAPE_FP_ORIG|REPL */
++	       + 8 * nla_total_size(sizeof(u_int32_t)) /* CTA_COMCERTO_FP_{MARK,IFINDEX,IIF,UNDERLYING_IIF} */
++	       + 2 * nla_total_size(sizeof(u_int16_t)) /* CTA_COMCERTO_FP_UNDERLYING_VID */
+ 	       + nla_total_size(NF_CT_HELPER_NAME_LEN) /* CTA_HELP_NAME */
+ 	       + ctnetlink_secctx_size(ct)
+ #if IS_ENABLED(CONFIG_NF_NAT)
+@@ -792,6 +842,9 @@
+ 	if (ctnetlink_dump_status(skb, ct) < 0)
+ 		goto nla_put_failure;
+ 
++	if (ctnetlink_dump_layerscape_fp(skb, ct) < 0)
++		goto nla_put_failure;
++
+ 	if (events & (1 << IPCT_DESTROY)) {
+ 		if (ctnetlink_dump_timeout(skb, ct, true) < 0)
+ 			goto nla_put_failure;
