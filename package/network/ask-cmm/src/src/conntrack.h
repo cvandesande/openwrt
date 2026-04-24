@@ -156,7 +156,7 @@
 
 	int cmmCtInit(struct cmm_ct *ctx);
 	void cmmCtExit(struct cmm_ct *ctx);
-	int __cmmRouteRegister(struct ct_route *rt, struct flow *flow, const char *dir);
+	int __cmmRouteRegister(FCI_CLIENT *fci_handle, struct ct_route *rt, struct flow *flow, const char *dir);
 	int ____cmmCtRegister(FCI_CLIENT *fci_handle, struct ctTable *ctEntry);
 	void __cmmCtUpdateWithRoute(FCI_CLIENT *fci_handle, struct RtEntry *route);
 	int cmmCtNetlinkRemove(struct nfct_handle * handler, struct nf_conntrack *ct);
