@@ -730,7 +730,7 @@ int __tunnel_add(FCI_CLIENT *fci_handle, struct interface *itf)
 		flow.proto = proto;
 		flow.flow_flags = FLOWFLAG_LOCAL;
 
-		rc = __cmmRouteRegister(&itf->rt, &flow, "tunnel");
+		rc = __cmmRouteRegister(fci_handle, &itf->rt, &flow, "tunnel");
 
 		if (itf->rt.route)
 			itf->phys_ifindex = itf->rt.route->oifindex;

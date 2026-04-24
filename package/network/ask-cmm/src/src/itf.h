@@ -265,12 +265,16 @@ struct interface {
 	unsigned int itf_flags; /* bit field with ITF_xxx flags */
 
 	int phys_ifindex;	/* physical interface index, if vlan/pppoe */
+	int fpp_prog_phys_ifindex; /* last programmed lower ifindex for vlan/pppoe */
 
 	u_int16_t session_id; /* session id if pppoe interface */
+	u_int16_t fpp_prog_session_id; /* last programmed PPPoE session id */
 	int		unit;				/* PPPoE unit number */
 	unsigned char dst_macaddr[ETH_ALEN]; /* peer mac address if pppoe interface */
+	unsigned char fpp_prog_dst_macaddr[ETH_ALEN]; /* last programmed PPPoE peer MAC */
 
 	u_int16_t vlan_id;	/* vlan id if vlan interface */
+	u_int16_t fpp_prog_vlan_id; /* last programmed VLAN id */
 
 	int ifindices[MAX_PORTS];	/* list of bridge ports if bridge interface */
 
