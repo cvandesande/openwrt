@@ -184,9 +184,8 @@
 
 &soc {
 	#include "qoriq-dpaa-eth.dtsi"
-	/* Stage 1 keeps sdk_dpaa in the direct private-interface mode.
-	 * The Stage 2 init/offline nodes stay boxed out until the control
-	 * path is ready to use them coherently.
+	/* Stage 2 restores the vendor DPAA datapath bindings that the
+	 * ask-dpa-app/CDX bootstrap consumes for offline-port setup.
 	 */
 };
 
@@ -280,6 +279,19 @@
 		/delete-property/ fixed-link;
 		phy-connection-type = "10gbase-r";
 		managed = "in-band-status";
+	};
+
+	/* DPA offline-port bindings consumed by ask-dpa-app/CDX. */
+	dpa-fman0-oh@2 {
+		compatible = "fsl,dpa-oh";
+		fsl,qman-frame-queues-oh = <0x60 0x01 0x61 0x01>;
+		fsl,fman-oh-port = <&fman0_oh_0x3>;
+	};
+
+	dpa-fman0-oh@3 {
+		compatible = "fsl,dpa-oh";
+		fsl,qman-frame-queues-oh = <0x62 0x01 0x63 0x01>;
+		fsl,fman-oh-port = <&fman0_oh_0x4>;
 	};
 
 	/* Override OH port cell-index values for SDK driver compatibility.
