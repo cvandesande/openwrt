@@ -153,8 +153,14 @@ typedef struct cmmd_ct_local_show_res {
 	u_int32_t	orig_mark;
 	int32_t		orig_oif;
 	int32_t		orig_phys_oif;
+	int32_t		rep_oif;
+	int32_t		rep_phys_oif;
+	u_int16_t	orig_route_id;
+	u_int16_t	rep_route_id;
 	u_int8_t	local_conn;
-	u_int8_t	pad3[3];
+	u_int8_t	dir;
+	u_int8_t	fpp_dir;
+	u_int8_t	dir_filter;
 } __attribute__((__packed__)) cmmd_ct_local_show_res_t;
 
 typedef struct cmmd_pppoe_local_show_res {
