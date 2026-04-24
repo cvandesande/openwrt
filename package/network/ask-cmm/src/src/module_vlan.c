@@ -23,6 +23,54 @@
 #include <sys/types.h>
 #include <sys/ioctl.h>
 
+static int cmmVlanFillCmdFromState(struct interface *itf, fpp_vlan_cmd_t *cmd,
+				   int action, int use_programmed_state)
+{
+	cmd->action = action;
+
+	if (____itf_get_name(itf, cmd->vlan_ifname, sizeof(cmd->vlan_ifname)) < 0)
+	{
+		cmm_print(DEBUG_ERROR, "%s: ____itf_get_name(%d) failed\n", __func__, itf->ifindex);
+		return -1;
+	}
+
+	if (use_programmed_state)
+	{
+		cmd->vlan_id = itf->fpp_prog_vlan_id;
+
+		if (__itf_get_name(itf->fpp_prog_phys_ifindex, cmd->vlan_phy_ifname,
+				   sizeof(cmd->vlan_phy_ifname)) < 0)
+		{
+			cmm_print(DEBUG_ERROR, "%s: __itf_get_name(%d) failed\n",
+				  __func__, itf->fpp_prog_phys_ifindex);
+			return -1;
+		}
+	}
+	else
+	{
+		cmd->vlan_id = itf->vlan_id;
+
+		if (__itf_get_name(itf->phys_ifindex, cmd->vlan_phy_ifname,
+				   sizeof(cmd->vlan_phy_ifname)) < 0)
+		{
+			cmm_print(DEBUG_ERROR, "%s: __itf_get_name(%d) failed\n",
+				  __func__, itf->phys_ifindex);
+			return -1;
+		}
+	}
+
+#if defined(LS1043)
+	memcpy(cmd->macaddr, itf->macaddr, ETH_ALEN);
+#endif
+	return 0;
+}
+
+static void cmmVlanStoreProgrammedState(struct interface *itf)
+{
+	itf->fpp_prog_phys_ifindex = itf->phys_ifindex;
+	itf->fpp_prog_vlan_id = itf->vlan_id;
+}
+
 
 void __cmmGetVlan(int fd, struct interface *itf)
 {
@@ -66,7 +114,6 @@ int cmmFeVLANUpdate(FCI_CLIENT *fci_handle, int request, struct interface *itf)
 {
 	fpp_vlan_cmd_t cmd;
 	short ret = CMMD_ERR_OK;
-	int action;
 
 	switch (request)
 	{
@@ -77,12 +124,28 @@ int cmmFeVLANUpdate(FCI_CLIENT *fci_handle, int request, struct interface *itf)
 
 		if ((itf->flags & (FPP_PROGRAMMED | FPP_NEEDS_UPDATE)) == (FPP_PROGRAMMED | FPP_NEEDS_UPDATE))
 		{
-			cmm_print(DEBUG_ERROR, "%s: trying to update vlan interface(%d)\n", __func__, itf->ifindex);
-			ret = CMMD_ERR_NOT_CONFIGURED;
-			goto out;
-		}
+			cmm_print(DEBUG_INFO, "%s: refreshing programmed vlan interface(%d)\n",
+				  __func__, itf->ifindex);
 
-		action = FPP_ACTION_REGISTER;
+			memset(&cmd, 0, sizeof(cmd));
+			if (cmmVlanFillCmdFromState(itf, &cmd, FPP_ACTION_DEREGISTER, 1) < 0)
+			{
+				ret = CMMD_ERR_WRONG_COMMAND_PARAM;
+				goto out;
+			}
+
+			ret = fci_write(fci_handle, FPP_CMD_VLAN_ENTRY,
+					sizeof(fpp_vlan_cmd_t), (unsigned short *)&cmd);
+			if ((ret != FPP_ERR_OK) && (ret != FPP_ERR_VLAN_ENTRY_NOT_FOUND))
+			{
+				cmm_print(DEBUG_ERROR,
+					  "%s: Error %d while refreshing old vlan interface(%d)\n",
+					  __func__, ret, itf->ifindex);
+				goto out;
+			}
+
+			itf->flags &= ~FPP_PROGRAMMED;
+		}
 
 		break;
 
@@ -90,45 +153,27 @@ int cmmFeVLANUpdate(FCI_CLIENT *fci_handle, int request, struct interface *itf)
 		if (!(itf->flags & FPP_PROGRAMMED))
 			goto out;
 
-		action = FPP_ACTION_DEREGISTER;
-
 		break;
 	}
 
 	memset(&cmd, 0, sizeof(cmd));
-
-	cmd.action = action;
-
-	if (____itf_get_name(itf, cmd.vlan_ifname, sizeof(cmd.vlan_ifname)) < 0)
+	switch (request)
 	{
-		cmm_print(DEBUG_ERROR, "%s: ____itf_get_name(%d) failed\n", __func__, itf->ifindex);
-		ret = CMMD_ERR_WRONG_COMMAND_PARAM;
-		goto out;
-	}
-
-	cmd.vlan_id = itf->vlan_id;
-
-	switch (action)
-	{
-	case FPP_ACTION_REGISTER:
-		cmm_print(DEBUG_COMMAND, "Send CMD_VLAN_ENTRY ACTION_REGISTER\n");
-
-		if (__itf_get_name(itf->phys_ifindex, cmd.vlan_phy_ifname, sizeof(cmd.vlan_phy_ifname)) < 0)
+	case ADD:
+		if (cmmVlanFillCmdFromState(itf, &cmd, FPP_ACTION_REGISTER, 0) < 0)
 		{
-			cmm_print(DEBUG_ERROR, "%s: __itf_get_name(%d) failed\n", __func__, itf->phys_ifindex);
 			ret = CMMD_ERR_WRONG_COMMAND_PARAM;
 			goto out;
 		}
 
-#if defined(LS1043)
-		memcpy(cmd.macaddr, itf->macaddr, 6);
-#endif
+		cmm_print(DEBUG_COMMAND, "Send CMD_VLAN_ENTRY ACTION_REGISTER\n");
 
 		ret = fci_write(fci_handle, FPP_CMD_VLAN_ENTRY, sizeof(fpp_vlan_cmd_t), (unsigned short *) &cmd);
 		if ((ret == FPP_ERR_OK) || (ret == FPP_ERR_VLAN_ENTRY_ALREADY_REGISTERED))
 		{
 			itf->flags |= FPP_PROGRAMMED;
 			itf->flags &= ~FPP_NEEDS_UPDATE;
+			cmmVlanStoreProgrammedState(itf);
 		}
 		else
 		{
@@ -138,24 +183,13 @@ int cmmFeVLANUpdate(FCI_CLIENT *fci_handle, int request, struct interface *itf)
 		
 
 		break;
-#if 0
-	case ACTION_UPDATE:
-		cmm_print(DEBUG_COMMAND, "Send CMD_VLAN_ENTRY ACTION_UPDATE\n");
 
-		ret = fci_write(fci_handle, CMD_VLAN_ENTRY, sizeof(struct VlanCmd), (unsigned short *) &cmd);
-		if (ret == NO_ERR)
+	case REMOVE:
+		if (cmmVlanFillCmdFromState(itf, &cmd, FPP_ACTION_DEREGISTER, 1) < 0)
 		{
-			itf->flags &= ~FPP_NEEDS_UPDATE;
+			ret = CMMD_ERR_WRONG_COMMAND_PARAM;
+			goto out;
 		}
-		else
-		{
-			cmm_print(DEBUG_ERROR, "%s: Error %d while sending CMD_VLAN_ENTRY, ACTION_UPDATE\n", __func__, ret);
-			goto err;
-		}
-
-		break;
-#endif
-	case FPP_ACTION_DEREGISTER:
 	
 		cmm_print(DEBUG_COMMAND, "Send CMD_VLAN_ENTRY ACTION_DEREGISTER\n");
 
@@ -163,6 +197,7 @@ int cmmFeVLANUpdate(FCI_CLIENT *fci_handle, int request, struct interface *itf)
 		if ((ret == FPP_ERR_OK) || (ret == FPP_ERR_VLAN_ENTRY_NOT_FOUND))
 		{
 			itf->flags &= ~FPP_PROGRAMMED;
+			itf->flags &= ~FPP_NEEDS_UPDATE;
 		}
 		else
 		{
@@ -173,7 +208,7 @@ int cmmFeVLANUpdate(FCI_CLIENT *fci_handle, int request, struct interface *itf)
 		break;
 
 	default:
-		cmm_print(DEBUG_ERROR, "%s: unknown CMD_VLAN_ENTRY action %x\n", __func__, action);
+		cmm_print(DEBUG_ERROR, "%s: unknown CMD_VLAN_ENTRY request %x\n", __func__, request);
 		ret = CMMD_ERR_UNKNOWN_ACTION;
 		break;
 	}
