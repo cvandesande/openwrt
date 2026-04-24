@@ -1,0 +1,238 @@
+--- a/cdx-5.03.1/devoh.c	2026-03-30 16:02:33.000000000 +0100
++++ b/cdx-5.03.1/devoh.c	2026-04-12 23:03:44.247040186 +0100
+@@ -77,6 +77,162 @@
+ 		const struct qm_dqrr_entry *dq);
+ extern int FM_PORT_SetOhPortRda(uint32_t fmidx, uint32_t portidx, uint32_t val);
+ 
++static void ipsec_ofport_diag_dump_sg(const char *tag, int idx,
++		const struct qm_sg_entry *sg)
++{
++	printk_ratelimited(KERN_INFO
++		"IPSEC_OHDBG: %s[%d] ext=%u final=%u len=%u bpid=%u off=%u addr=0x%llx\n",
++		tag, idx, qm_sg_entry_get_ext(sg), qm_sg_entry_get_final(sg),
++		qm_sg_entry_get_len(sg), qm_sg_entry_get_bpid(sg),
++		qm_sg_entry_get_offset(sg),
++		(unsigned long long)qm_sg_addr(sg));
++}
++
++static void ipsec_ofport_diag_dump_fd(const char *stage, struct qman_fq *fq,
++		const struct qm_fd *fd)
++{
++	const char *fmt = "contig";
++
++	switch (fd->format) {
++	case qm_fd_sg:
++		fmt = "sg";
++		break;
++	case qm_fd_compound:
++		fmt = "compound";
++		break;
++	default:
++		break;
++	}
++
++	printk_ratelimited(KERN_INFO
++		"IPSEC_OHDBG: stage=%s fqid=0x%x fmt=%s(%u) st=0x%08x len=%u off=%u bpid=%u addr=0x%llx\n",
++		stage, fq->fqid, fmt, fd->format, fd->status, fd->length20,
++		fd->offset, fd->bpid, (unsigned long long)qm_fd_addr(fd));
++
++	if (fd->format == qm_fd_compound) {
++		struct qm_sg_entry *sgt;
++
++		sgt = (struct qm_sg_entry *)phys_to_virt((uint64_t)qm_fd_addr(fd));
++		if (!sgt)
++			return;
++		ipsec_ofport_diag_dump_sg("compound", 0, &sgt[0]);
++		ipsec_ofport_diag_dump_sg("compound", 1, &sgt[1]);
++	} else if (fd->format == qm_fd_sg) {
++		struct qm_sg_entry *sgt;
++
++		sgt = (struct qm_sg_entry *)phys_to_virt((uint64_t)qm_fd_addr(fd));
++		if (!sgt)
++			return;
++		ipsec_ofport_diag_dump_sg("sg", 0, &sgt[0]);
++		ipsec_ofport_diag_dump_sg("sg", 1, &sgt[1]);
++		ipsec_ofport_diag_dump_sg("sg", 2, &sgt[2]);
++	}
++}
++
++static void ipsec_ofport_log_pkt_identity(const char *stage, uint32_t fqid,
++		const struct qm_fd *fd)
++{
++	const uint8_t *pkt;
++	uint32_t len;
++	uint32_t l3 = ETH_HLEN;
++	uint16_t eth;
++	uint16_t ppp_proto = 0;
++	uint8_t ipver = 0;
++	uint8_t proto = 0;
++	uint16_t ipid = 0;
++	uint32_t esp_spi = 0;
++	uint32_t esp_seq = 0;
++	uint16_t icmp_seq = 0;
++	bool have_icmp_seq = false;
++	bool have_esp = false;
++	uint8_t ihl;
++
++	if (!fd || fd->format != qm_fd_contig || !qm_fd_addr(fd) || !fd->length20)
++		return;
++
++	len = fd->length20;
++	pkt = (const uint8_t *)(phys_to_virt((uint64_t)qm_fd_addr(fd)) +
++			fd->offset);
++	if (len < ETH_HLEN)
++		return;
++
++	eth = ((uint16_t)pkt[12] << 8) | pkt[13];
++
++	while ((eth == 0x8100 || eth == 0x88a8) && (len >= (l3 + 4))) {
++		eth = ((uint16_t)pkt[l3 + 2] << 8) | pkt[l3 + 3];
++		l3 += 4;
++	}
++
++	if ((eth == 0x8864) && (len >= (l3 + 8))) {
++		ppp_proto = ((uint16_t)pkt[l3 + 6] << 8) | pkt[l3 + 7];
++		l3 += 8;
++		if (ppp_proto == 0x0021)
++			eth = 0x0800;
++		else if (ppp_proto == 0x0057)
++			eth = 0x86dd;
++	}
++
++	if ((eth == 0x0800) && (len >= (l3 + 20))) {
++		ipver = pkt[l3] >> 4;
++		ihl = (pkt[l3] & 0x0f) << 2;
++		if ((ihl >= 20) && (len >= (l3 + ihl))) {
++			proto = pkt[l3 + 9];
++			ipid = ((uint16_t)pkt[l3 + 4] << 8) | pkt[l3 + 5];
++			if ((proto == IPPROTO_ICMP) && (len >= (l3 + ihl + 8))) {
++				icmp_seq = ((uint16_t)pkt[l3 + ihl + 6] << 8) |
++						pkt[l3 + ihl + 7];
++				have_icmp_seq = true;
++			} else if ((proto == IPPROTO_ESP) &&
++					(len >= (l3 + ihl + 8))) {
++				esp_spi = ((uint32_t)pkt[l3 + ihl] << 24) |
++					((uint32_t)pkt[l3 + ihl + 1] << 16) |
++					((uint32_t)pkt[l3 + ihl + 2] << 8) |
++					pkt[l3 + ihl + 3];
++				esp_seq = ((uint32_t)pkt[l3 + ihl + 4] << 24) |
++					((uint32_t)pkt[l3 + ihl + 5] << 16) |
++					((uint32_t)pkt[l3 + ihl + 6] << 8) |
++					pkt[l3 + ihl + 7];
++				have_esp = true;
++			}
++		}
++	}
++
++	printk_ratelimited(KERN_INFO
++		"IPSEC_OHDBG: stage=%s fqid=0x%x len=%u l3=%u eth=0x%04x ppp=0x%04x ipver=%u proto=%u id=0x%04x icmp_seq=%u esp_spi=0x%08x esp_seq=%u flags[i=%u e=%u]\n",
++		stage, fqid, len, l3, eth, ppp_proto, ipver, proto, ipid,
++		icmp_seq, esp_spi, esp_seq, have_icmp_seq, have_esp);
++	print_hex_dump(KERN_INFO, "IPSEC_OHHEX: ", DUMP_PREFIX_OFFSET, 16, 1,
++			pkt, len > 64 ? 64 : len, false);
++}
++
++static void ipsec_ofport_log_buf_views(const char *stage, uint32_t fqid,
++		const struct qm_fd *fd)
++{
++	const uint8_t *base;
++	const uint8_t *pkt;
++	uint32_t ann_len;
++	uint32_t pkt_len;
++
++	if (!fd || fd->format != qm_fd_contig || !qm_fd_addr(fd))
++		return;
++
++	base = (const uint8_t *)phys_to_virt((uint64_t)qm_fd_addr(fd));
++	pkt = base + fd->offset;
++	ann_len = fd->offset > 64 ? 64 : fd->offset;
++	pkt_len = fd->length20 > 64 ? 64 : fd->length20;
++
++	printk_ratelimited(KERN_INFO
++		"IPSEC_OHDBG: stage=%s fqid=0x%x base=0x%llx off=%u ann_len=%u pkt_len=%u\n",
++		stage, fqid, (unsigned long long)qm_fd_addr(fd), fd->offset,
++		ann_len, pkt_len);
++	if (ann_len)
++		print_hex_dump(KERN_INFO, "IPSEC_OHANN: ",
++				DUMP_PREFIX_OFFSET, 16, 1, base, ann_len, false);
++	if (pkt_len)
++		print_hex_dump(KERN_INFO, "IPSEC_OHPKT: ",
++				DUMP_PREFIX_OFFSET, 16, 1, pkt, pkt_len, false);
++}
++
+ void *  get_oh_port_td(uint32_t fm_index, uint32_t port_idx, uint32_t type)
+ {
+ 
+@@ -441,6 +597,9 @@
+ 	len = dq->fd.length20;
+ 
+ 	fd = &dq->fd;
++	ipsec_ofport_diag_dump_fd("defa", fq, fd);
++	ipsec_ofport_log_pkt_identity("defa-pkt", fq->fqid, fd);
++	ipsec_ofport_log_buf_views("defa-buf", fq->fqid, fd);
+ 	printk("%s::fqid %x(%d), bpid %d, len %d, offset %d  addr %llx status: %x\n", __FUNCTION__,
+ 			dq->fqid, dq->fqid, dq->fd.bpid, dq->fd.length20,
+ 			dq->fd.offset, (uint64_t)dq->fd.addr, dq->fd.status);
+@@ -459,12 +618,28 @@
+ 			struct dpa_bp *dpa_bp;
+ 			dpa_bp = dpa_bpid2pool(fd->bpid);
+ 			if (dpa_bp) {
++				printk_ratelimited(KERN_INFO
++					"IPSEC_OHDBG: stage=defa-release fqid=0x%x bpid=%u addr=0x%llx\n",
++					fq->fqid, fd->bpid,
++					(unsigned long long)fd->addr);
+ 				printk(KERN_CRIT "%s::releasing buffer to pool %d\n", 
+ 						__FUNCTION__, fd->bpid);
+ 				memset(&bmb, 0, sizeof(struct bm_buffer));
+ 				bm_buffer_set64(&bmb, dq->fd.addr);
+ 				while (bman_release(dpa_bp->pool, &bmb, 1, 0))
+ 					cpu_relax();
++			} else {
++				/* Pool not registered (e.g. SEC output pool).
++				 * Release by bpid directly, matching the
++				 * fallback in dpa_fd_release(). */
++				printk_ratelimited(KERN_INFO
++					"IPSEC_OHDBG: stage=defa-release-by-bpid fqid=0x%x bpid=%u addr=0x%llx\n",
++					fq->fqid, fd->bpid,
++					(unsigned long long)fd->addr);
++				memset(&bmb, 0, sizeof(struct bm_buffer));
++				bm_buffer_set64(&bmb, dq->fd.addr);
++				while (bman_release_by_bpid(fd->bpid, &bmb, 1))
++					cpu_relax();
+ 			}
+ 		} else {
+ 			printk(KERN_CRIT "%s::cannot handle sg buffers now\n", __FUNCTION__);
+@@ -484,6 +659,9 @@
+ 
+ 	len = dq->fd.length20;
+ 	fd = &dq->fd;
++	ipsec_ofport_diag_dump_fd("err", fq, fd);
++	ipsec_ofport_log_pkt_identity("err-pkt", fq->fqid, fd);
++	ipsec_ofport_log_buf_views("err-buf", fq->fqid, fd);
+ 	printk("%s::fqid %x(%d), bpid %d status %08x, len %d(0x%x), format %s\n", __FUNCTION__,
+ 			fq->fqid, fq->fqid, fd->bpid, fd->status,len,len,
+ 			(fd->format == qm_fd_sg) ? "SGlist" : "simple");
+@@ -513,6 +691,18 @@
+ 				bm_buffer_set64(&bmb, dq->fd.addr);
+ 				while (bman_release(dpa_bp->pool, &bmb, 1, 0))
+ 					cpu_relax();
++			} else {
++				/* Pool not registered (e.g. SEC output pool).
++				 * Release by bpid directly, matching the
++				 * fallback in dpa_fd_release(). */
++				printk_ratelimited(KERN_INFO
++					"IPSEC_OHDBG: stage=err-release-by-bpid fqid=0x%x bpid=%u addr=0x%llx\n",
++					fq->fqid, fd->bpid,
++					(unsigned long long)fd->addr);
++				memset(&bmb, 0, sizeof(struct bm_buffer));
++				bm_buffer_set64(&bmb, dq->fd.addr);
++				while (bman_release_by_bpid(fd->bpid, &bmb, 1))
++					cpu_relax();
+ 			}
+ 		} else {
+ 			printk(KERN_CRIT "%s::freeing sg buffers now\n", __FUNCTION__);
+@@ -646,4 +836,3 @@
+ 	}
+ 	return 0;
+ }
+-
