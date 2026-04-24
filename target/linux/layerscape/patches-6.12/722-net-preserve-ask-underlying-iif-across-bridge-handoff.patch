@@ -1,0 +1,69 @@
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -1027,6 +1027,10 @@ struct sk_buff {
+ 	};
+ 	__u32			priority;
+ 	int			skb_iif;
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	/* Preserve the physical ingress ifindex after bridge handoff. */
++	int			layerscape_underlying_iif;
++#endif
+ 	__u32			hash;
+ 	union {
+ 		u32		vlan_all;
+--- a/net/bridge/br_input.c
++++ b/net/bridge/br_input.c
+@@ -66,6 +66,7 @@ static int br_pass_frame_up(struct sk_buff *skb, bool promisc)
+ 	br_multicast_count(br, NULL, skb, br_multicast_igmp_type(skb),
+ 			   BR_MCAST_DIR_TX);
+ 
++	skb->layerscape_underlying_iif = indev->ifindex;
+ 	BR_INPUT_SKB_CB(skb)->promisc = promisc;
+ 
+ 	return NF_HOOK(NFPROTO_BRIDGE, NF_BR_LOCAL_IN,
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -5582,6 +5582,9 @@ static int __netif_receive_skb_core(struct sk_buff **pskb, bool pfmemalloc,
+ 
+ 	trace_netif_receive_skb(skb);
+ 
++	if (!skb->layerscape_underlying_iif)
++		skb->layerscape_underlying_iif = skb->dev->ifindex;
++
+ 	orig_dev = skb->dev;
+ 
+ 	skb_reset_network_header(skb);
+--- a/net/core/gro.c
++++ b/net/core/gro.c
+@@ -649,6 +649,9 @@ static void napi_reuse_skb(struct napi_struct *napi, struct sk_buff *skb)
+ 	__vlan_hwaccel_clear_tag(skb);
+ 	skb->dev = napi->dev;
+ 	skb->skb_iif = 0;
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	skb->layerscape_underlying_iif = 0;
++#endif
+ 
+ 	/* eth_type_trans() assumes pkt_type is PACKET_HOST */
+ 	skb->pkt_type = PACKET_HOST;
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -1557,6 +1557,9 @@ static void __copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
+ 	CHECK_SKB_FIELD(hash);
+ 	CHECK_SKB_FIELD(priority);
+ 	CHECK_SKB_FIELD(skb_iif);
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	CHECK_SKB_FIELD(layerscape_underlying_iif);
++#endif
+ 	CHECK_SKB_FIELD(vlan_proto);
+ 	CHECK_SKB_FIELD(vlan_tci);
+ 	CHECK_SKB_FIELD(transport_header);
+@@ -6124,6 +6127,9 @@ void skb_scrub_packet(struct sk_buff *skb, bool xnet)
+ {
+ 	skb->pkt_type = PACKET_HOST;
+ 	skb->skb_iif = 0;
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
++	skb->layerscape_underlying_iif = 0;
++#endif
+ 	skb->ignore_df = 0;
+ 	skb_dst_drop(skb);
+ 	skb_ext_reset(skb);
