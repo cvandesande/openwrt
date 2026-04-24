@@ -121,7 +121,8 @@
 	struct RtEntry *__cmmRouteGet(struct flow *flow);
 
 	void __cmmFFPRouteUpdate(struct fpp_rt *route, int oifindex, const unsigned char *dst_mac, int mtu, const unsigned int *dst_addr, int dst_addr_len);
-	struct fpp_rt *__cmmFPPRouteFind(int oifindex, int iifindex, const unsigned char *dst_mac, int mtu, const unsigned int *dst_addr, int dst_addr_len);
+	struct fpp_rt *__cmmFPPRouteFind(int oifindex, int iifindex, int underlying_iifindex,
+				const unsigned char *dst_mac, int mtu, const unsigned int *dst_addr, int dst_addr_len);
 	void __cmmFPPRouteRemove(struct fpp_rt *route);
 	void __cmmFPPRoutePut(struct fpp_rt *route);
 	struct fpp_rt *__cmmFPPRouteAdd(int oifindex, int iifindex, int underlying_iifindex, 
