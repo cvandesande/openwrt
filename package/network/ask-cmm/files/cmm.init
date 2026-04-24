@@ -1,0 +1,99 @@
+#!/bin/sh /etc/rc.common
+#
+# Copyright 2018 NXP
+# Copyright 2026 Mono Technologies Inc.
+#
+# This is free software, licensed under the GNU General Public License v2.
+# See /LICENSE for more information.
+#
+
+START=54
+STOP=46
+
+CONF=/etc/config/fastforward
+OPTIONS="-f $CONF"
+
+# Read nf_conntrack_max from sysctl config
+NF_CONNTRACK_MAX=$(grep "nf_conntrack_max" /etc/sysctl.d/11-nf-conntrack.conf 2>/dev/null | cut -d'=' -f 2)
+if [ -n "$NF_CONNTRACK_MAX" ] && [ "$NF_CONNTRACK_MAX" -gt 0 ] 2>/dev/null; then
+	OPTIONS="$OPTIONS -n $NF_CONNTRACK_MAX"
+fi
+
+# Platform detection for VWD fast path control
+CMM_CREATED_VWD_DEV=""
+if [ -e /proc/device-tree/model ]; then
+	if grep -q "LS1012A" /proc/device-tree/model; then
+		VWD_ENABLE_FASTPATH=/sys/devices/platform/4000000.pfe/vwd_fast_path_enable
+		CMM_CREATED_VWD_DEV="Y"
+	elif grep -q "LS1043A\|LS1046A" /proc/device-tree/model; then
+		VWD_ENABLE_FASTPATH=/sys/class/vwd/vwd0/vwd_fast_path_enable
+	else
+		VWD_ENABLE_FASTPATH=/sys/class/vwd/vwd0/vwd_fast_path_enable
+	fi
+else
+	VWD_ENABLE_FASTPATH=/sys/class/vwd/vwd0/vwd_fast_path_enable
+fi
+
+start() {
+	# Check if fast path is disabled
+	if [ -e /proc/fppmode ]; then
+		if grep -q "0" /proc/fppmode; then
+			exit 0
+		fi
+	fi
+
+	# Create VWD device node if needed (LS1012A)
+	if [ "$CMM_CREATED_VWD_DEV" = "Y" ]; then
+		major=$(grep vwd /proc/devices | awk '{ print $1 }')
+		rm -f /dev/vwd0
+		if [ -n "$major" ]; then
+			mknod /dev/vwd0 c "$major" 0
+		fi
+	fi
+
+	# Enable fast path
+	[ -e "$VWD_ENABLE_FASTPATH" ] && echo 1 > "$VWD_ENABLE_FASTPATH"
+
+	# Load netfilter modules
+	insmod nfnetlink 2>/dev/null
+	insmod nf_defrag_ipv4 2>/dev/null
+	insmod nf_conntrack 2>/dev/null
+	insmod nf_conntrack_ipv4 2>/dev/null
+	insmod nf_conntrack_ipv6 2>/dev/null
+	insmod nf_nat 2>/dev/null
+	insmod nf_conntrack_netlink 2>/dev/null
+
+	# Start CMM daemon
+	[ -d /var/run ] || mkdir -p /var/run
+	/usr/sbin/cmm $OPTIONS
+
+	# Restart QoS if present
+	[ -e /etc/init.d/qos ] && sleep 1 && /etc/init.d/qos restart
+}
+
+stop() {
+	# Check if fast path is disabled
+	if [ -e /proc/fppmode ]; then
+		if grep -q "0" /proc/fppmode; then
+			exit 0
+		fi
+	fi
+
+	# Stop CMM daemon
+	[ -f /var/run/cmm.pid ] && kill $(cat /var/run/cmm.pid) >/dev/null 2>&1
+
+	# Unload netfilter modules
+	rmmod nf_conntrack_netlink 2>/dev/null
+	rmmod nf_nat 2>/dev/null
+	rmmod nf_conntrack_ipv6 2>/dev/null
+	rmmod nf_conntrack_ipv4 2>/dev/null
+	rmmod nfnetlink 2>/dev/null
+
+	# Disable fast path
+	[ -e "$VWD_ENABLE_FASTPATH" ] && echo 0 > "$VWD_ENABLE_FASTPATH"
+
+	# Remove VWD device node if we created it
+	if [ "$CMM_CREATED_VWD_DEV" = "Y" ]; then
+		rm -f /dev/vwd0
+	fi
+}
