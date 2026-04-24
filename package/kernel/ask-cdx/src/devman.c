@@ -1425,6 +1425,14 @@ int dpa_get_tx_info_by_itf(PRouteEntry rt_entry, struct dpa_l2hdr_info *l2_info,
 	int retval = FAILURE;
 	union ctentry_qosmark *qosmark;
 	unsigned char* src_mac = NULL;
+	const char *out_name;
+	const char *in_name;
+	const char *underlying_name;
+
+	out_name = (rt_entry && rt_entry->itf) ? get_onif_name(rt_entry->itf->index) : "NULL";
+	in_name = (rt_entry && rt_entry->input_itf) ? get_onif_name(rt_entry->input_itf->index) : "NULL";
+	underlying_name = (rt_entry && rt_entry->underlying_input_itf) ?
+		get_onif_name(rt_entry->underlying_input_itf->index) : "NULL";
 
 	qosmark = (union ctentry_qosmark *)qosinfo;
 	memset(l2_info, 0, sizeof(struct dpa_l2hdr_info));
@@ -1433,15 +1441,22 @@ int dpa_get_tx_info_by_itf(PRouteEntry rt_entry, struct dpa_l2hdr_info *l2_info,
 	spin_lock(&dpa_devlist_lock);
 	if(!rt_entry->input_itf || !rt_entry->underlying_input_itf)
 	{
-		DPA_ERROR("%s::NULL Input interface \n",
-				__FUNCTION__);
+		DPA_ERROR("%s::NULL input interface out=%s(%u) in=%s(%u) underlying=%s(%u)\n",
+				__FUNCTION__, out_name,
+				rt_entry && rt_entry->itf ? rt_entry->itf->index : 0,
+				in_name,
+				rt_entry && rt_entry->input_itf ? rt_entry->input_itf->index : 0,
+				underlying_name,
+				rt_entry && rt_entry->underlying_input_itf ? rt_entry->underlying_input_itf->index : 0);
 		goto err_ret;
 	}
 
 	if (dpa_check_for_logical_iface_types(rt_entry->input_itf, rt_entry->underlying_input_itf, 
 				l2_info, l3_info)) {
-		DPA_ERROR("%s::get_iface_type failed iface %d\n", 
-				__FUNCTION__,  rt_entry->input_itf->index);
+		DPA_ERROR("%s::get_iface_type failed out=%s(%u) in=%s(%u) underlying=%s(%u)\n",
+				__FUNCTION__, out_name, rt_entry->itf->index,
+				in_name, rt_entry->input_itf->index,
+				underlying_name, rt_entry->underlying_input_itf->index);
 		goto err_ret;
 	}
 
@@ -1457,6 +1472,13 @@ int dpa_get_tx_info_by_itf(PRouteEntry rt_entry, struct dpa_l2hdr_info *l2_info,
 
 	itf_id = rt_entry->itf->index;
 	iface_info = dpa_get_ifinfo_by_itfid(itf_id);
+	if (!iface_info) {
+		DPA_ERROR("%s::missing output iface info out=%s(%u) in=%s(%u) underlying=%s(%u)\n",
+				__FUNCTION__, out_name, rt_entry->itf->index,
+				in_name, rt_entry->input_itf->index,
+				underlying_name, rt_entry->underlying_input_itf->index);
+		goto err_ret;
+	}
 	l2_info->mtu = rt_entry->mtu;
 	while (1) {
 		if (!iface_info)
@@ -1507,7 +1529,14 @@ int dpa_get_tx_info_by_itf(PRouteEntry rt_entry, struct dpa_l2hdr_info *l2_info,
 			}
 
 			if(dpa_get_fqid_from_eth(eth_info, &l2_info->fqid, qosinfo))
+			{
+				DPA_ERROR("%s::eth fq lookup failed out=%s(%u) eth=%s(%u) in=%s(%u) underlying=%s(%u)\n",
+						__FUNCTION__, out_name, rt_entry->itf->index,
+						iface_info->name, iface_info->itf_id,
+						in_name, rt_entry->input_itf->index,
+						underlying_name, rt_entry->underlying_input_itf->index);
 				goto err_ret;
+			}
 			if (cdx_get_tx_dscp_fq_map(eth_info, &l2_info->is_dscp_fq_map, qosinfo) != 0)
 			{
 				DPA_ERROR("%s::unable to get ceetm dscp fq map\n", __FUNCTION__);
@@ -1545,6 +1574,12 @@ int dpa_get_tx_info_by_itf(PRouteEntry rt_entry, struct dpa_l2hdr_info *l2_info,
 			}
 			//move to parent interface
 			parent = iface_info->vlan_info.parent;
+			if (!parent) {
+				DPA_ERROR("%s::vlan iface %s(%u) missing parent for out=%s(%u)\n",
+						__FUNCTION__, iface_info->name, iface_info->itf_id,
+						out_name, rt_entry->itf->index);
+				break;
+			}
 #ifdef DEVMAN_DEBUG
 			DPA_INFO("%s::moving to parent "
 					"iface %s id %d\n",
@@ -1579,6 +1614,12 @@ int dpa_get_tx_info_by_itf(PRouteEntry rt_entry, struct dpa_l2hdr_info *l2_info,
 		if (iface_info->if_flags & IF_TYPE_PPPOE) {
 			//move to parent interface
 			parent = iface_info->pppoe_info.parent;
+			if (!parent) {
+				DPA_ERROR("%s::pppoe iface %s(%u) missing parent for out=%s(%u)\n",
+						__FUNCTION__, iface_info->name, iface_info->itf_id,
+						out_name, rt_entry->itf->index);
+				break;
+			}
 #ifdef DEVMAN_DEBUG
 			DPA_INFO("%s::moving to parent "
 					"iface %s id %d\n",
@@ -1669,6 +1710,12 @@ int dpa_get_tx_info_by_itf(PRouteEntry rt_entry, struct dpa_l2hdr_info *l2_info,
 	}
 	if (src_mac)
 		memcpy(&l2_info->l2hdr[ETHER_ADDR_LEN], src_mac, ETHER_ADDR_LEN);
+	if (retval != SUCCESS) {
+		DPA_ERROR("%s::failed to resolve tx info out=%s(%u) in=%s(%u) underlying=%s(%u)\n",
+				__FUNCTION__, out_name, rt_entry->itf->index,
+				in_name, rt_entry->input_itf->index,
+				underlying_name, rt_entry->underlying_input_itf->index);
+	}
 err_ret:
 	spin_unlock(&dpa_devlist_lock);
 	return retval;
