@@ -378,7 +378,7 @@ TARGET_DEVICES += fsl_lx2160a-rdb-sdboot
 define Device/mono_gateway-dk
   DEVICE_VENDOR := Mono Technologies Inc.
   DEVICE_MODEL := Gateway Development Kit
-  DEVICE_DTS := mono-gateway-dk
+  DEVICE_DTS := mono-gateway-dk-sdk
   DEVICE_DTS_DIR := $(DTS_DIR)/freescale
   KERNEL_LOADADDR := 0x80000000
   KERNEL := kernel-bin | gzip | fit gzip $$(DEVICE_DTS_DIR)/$$(DEVICE_DTS).dtb
