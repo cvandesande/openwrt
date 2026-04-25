@@ -14,10 +14,11 @@ Primary responsibilities:
 ## 2) Where It Lives
 
 - Package dir: `package/kernel/ask-cdx`
-- Active patch set:
-  - `patches/001-ipsec-core.patch` - Core IPsec offload functionality
-  - `patches/002-ipsec-compat-path.patch` - Compatibility path handling
-  - `patches/004-ipsec-dpaa-helpers.patch` - DPAA helper functions
+- Source repo: `https://github.com/cvandesande/ask-cdx`
+- The OpenWrt package fetches a pinned source revision through the normal
+  package workflow.
+- Local OpenWrt ownership stays with package metadata and service integration
+  under `files/`.
 
 ## 3) Build / Install Basics
 

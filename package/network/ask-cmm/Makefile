@@ -9,9 +9,14 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ask-cmm
 PKG_VERSION:=17.03.1
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 
-PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
+PKG_SOURCE_PROTO:=git
+PKG_SOURCE_URL:=https://github.com/cvandesande/ask-cmm.git
+PKG_SOURCE_VERSION:=80d43ab8b25dcd627c68e22c81b9e35a8f562487
+PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
+PKG_MIRROR_HASH:=efbc4f7cce00642b2e016926709021ff15fd022c144fea32c35953b89e61d166
+PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
 PKG_LICENSE:=GPL-2.0-or-later
 PKG_LICENSE_FILES:=COPYING.GPL
@@ -29,19 +34,13 @@ define Package/ask-cmm
   DEPENDS:=@TARGET_layerscape +libnetfilter-conntrack +libfci +libcli +libpcap \
 	+kmod-nf-conntrack +kmod-nf-conntrack-netlink +kmod-nf-nat \
 	+kmod-br-netfilter
-  URL:=https://github.com/we-are-mono/ASK
+  URL:=https://github.com/cvandesande/ask-cmm
 endef
 
 define Package/ask-cmm/description
   Connection Manager Module (CMM) daemon for managing fast path network
   offloading on NXP Layerscape processors. Part of the Application
   Solutions Kit (ASK).
-endef
-
-define Build/Prepare
-	rm -rf $(PKG_BUILD_DIR)
-	mkdir -p $(PKG_BUILD_DIR)
-	$(CP) ./src/. $(PKG_BUILD_DIR)/
 endef
 
 # Build only the wired-first Stage 2 surface. WiFi, auto-bridge, the KEY/IPsec
