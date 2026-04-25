@@ -33,6 +33,14 @@ platform_do_upgrade_sdboot() {
 
 }
 
+platform_do_upgrade_emmc() {
+	local image_file="$1"
+
+	echo "Writing image to /dev/mmcblk0p1..."
+	get_image "$image_file" | fwtool -i /dev/null -T - | dd of=/dev/mmcblk0p1 bs=512k conv=fsync
+	echo "Upgrade complete"
+}
+
 platform_do_upgrade_traverse_slotubi() {
 	part="$(awk -F 'ubi.mtd=' '{printf $2}' /proc/cmdline | sed -e 's/ .*$//')"
 	echo "Active boot slot: ${part}"
@@ -67,6 +75,13 @@ platform_copy_config_sdboot() {
 		umount /mnt
 	fi
 }
+platform_copy_config_emmc() {
+	mount -t ext4 -o rw,noatime /dev/mmcblk0p1 /mnt 2>&1
+	echo "Saving config backup..."
+	cp -af "$UPGRADE_BACKUP" "/mnt/$BACKUP_FILE"
+	umount /mnt
+}
+
 platform_copy_config() {
 	local board=$(board_name)
 
@@ -81,6 +96,9 @@ platform_copy_config() {
 	fsl,ls1088a-rdb-sdboot | \
 	fsl,lx2160a-rdb-sdboot)
 		platform_copy_config_sdboot
+		;;
+	mono,gateway-dk)
+		platform_copy_config_emmc
 		;;
 	esac
 }
@@ -110,7 +128,8 @@ platform_check_image() {
 	fsl,ls1088a-rdb-sdboot | \
 	fsl,ls2088a-rdb | \
 	fsl,lx2160a-rdb | \
-	fsl,lx2160a-rdb-sdboot)
+	fsl,lx2160a-rdb-sdboot | \
+	mono,gateway-dk)
 		return 0
 		;;
 	*)
@@ -154,6 +173,10 @@ platform_do_upgrade() {
 	fsl,ls1088a-rdb-sdboot | \
 	fsl,lx2160a-rdb-sdboot)
 		platform_do_upgrade_sdboot "$1"
+		return 0
+		;;
+	mono,gateway-dk)
+		platform_do_upgrade_emmc "$1"
 		return 0
 		;;
 	*)
