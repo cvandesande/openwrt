@@ -1,0 +1,186 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Fan control for Microchip EMC2305
+# Reads temperature from hwmon and sets fan PWM linearly
+#
+# Copyright (C) 2025 Mono Technologies Inc.
+
+# Default values
+DEF_INTERVAL=10
+DEF_MINTEMP=45
+DEF_MAXTEMP=75
+DEF_MINPWM=50
+DEF_MAXPWM=255
+
+# Load configuration from UCI
+# Note: uci get works without sourcing /lib/functions.sh
+load_config() {
+    INTERVAL=$(uci -q get fancontrol.@fancontrol[0].interval) || INTERVAL=$DEF_INTERVAL
+    [ -z "$INTERVAL" ] && INTERVAL=$DEF_INTERVAL
+    MINTEMP=$(uci -q get fancontrol.@fancontrol[0].mintemp) || MINTEMP=$DEF_MINTEMP
+    [ -z "$MINTEMP" ] && MINTEMP=$DEF_MINTEMP
+    MAXTEMP=$(uci -q get fancontrol.@fancontrol[0].maxtemp) || MAXTEMP=$DEF_MAXTEMP
+    [ -z "$MAXTEMP" ] && MAXTEMP=$DEF_MAXTEMP
+    MINPWM=$(uci -q get fancontrol.@fancontrol[0].minpwm) || MINPWM=$DEF_MINPWM
+    [ -z "$MINPWM" ] && MINPWM=$DEF_MINPWM
+    MAXPWM=$(uci -q get fancontrol.@fancontrol[0].maxpwm) || MAXPWM=$DEF_MAXPWM
+    [ -z "$MAXPWM" ] && MAXPWM=$DEF_MAXPWM
+}
+
+# Find hwmon device by name
+find_hwmon_by_name() {
+    local name="$1"
+    for h in /sys/class/hwmon/hwmon*; do
+        [ -f "$h/name" ] && [ "$(cat "$h/name" 2>/dev/null)" = "$name" ] && echo "$h" && return
+    done
+}
+
+# Find hwmon device by compatible string in device tree
+find_hwmon_by_compatible() {
+    local compatible="$1"
+    for h in /sys/class/hwmon/hwmon*; do
+        [ -f "$h/device/of_node/compatible" ] && \
+            grep -q "$compatible" "$h/device/of_node/compatible" 2>/dev/null && \
+            echo "$h" && return
+    done
+}
+
+# Try to find temperature sensor
+find_temp_sensor() {
+    # Try cluster_thermal first (CPU thermal zone)
+    local hwmon=$(find_hwmon_by_name "cluster_thermal")
+    [ -n "$hwmon" ] && echo "$hwmon" && return
+    
+    # Try tmp421 sensors
+    hwmon=$(find_hwmon_by_name "tmp421")
+    [ -n "$hwmon" ] && echo "$hwmon" && return
+    
+    # Try by compatible
+    hwmon=$(find_hwmon_by_compatible "ti,tmp421")
+    [ -n "$hwmon" ] && echo "$hwmon" && return
+    
+    return 1
+}
+
+# Find EMC2305 fan controller
+find_fan_controller() {
+    find_hwmon_by_name "emc2305" && return
+    find_hwmon_by_compatible "microchip,emc2305" && return
+    return 1
+}
+
+# Get temperature value (handles both raw and scaled values)
+get_temperature() {
+    local hwmon="$1"
+    local temp_file="$hwmon/temp1_input"
+    
+    # Try temp1 first, then temp2 if needed
+    if [ -f "$temp_file" ]; then
+        cat "$temp_file" 2>/dev/null && return
+    fi
+    
+    temp_file="$hwmon/temp2_input"
+    if [ -f "$temp_file" ]; then
+        cat "$temp_file" 2>/dev/null && return
+    fi
+    
+    return 1
+}
+
+# Calculate PWM from temperature using linear interpolation
+calc_pwm() {
+    local temp=$1
+    local pwm
+    
+    if [ "$temp" -le "$MINTEMP" ]; then
+        pwm=$MINPWM
+    elif [ "$temp" -ge "$MAXTEMP" ]; then
+        pwm=$MAXPWM
+    else
+        # Linear interpolation: pwm = MINPWM + (temp - MINTEMP) * (MAXPWM - MINPWM) / (MAXTEMP - MINTEMP)
+        pwm=$(( MINPWM + (temp - MINTEMP) * (MAXPWM - MINPWM) / (MAXTEMP - MINTEMP) ))
+    fi
+    
+    echo $pwm
+}
+
+# Set PWM value on fan controller (single fan)
+set_pwm() {
+    local hwmon="$1"
+    local pwm="$2"
+    
+    # Single fan on pwm1
+    if [ -f "$hwmon/pwm1" ]; then
+        echo "$pwm" > "$hwmon/pwm1" 2>/dev/null
+    fi
+}
+
+# Main loop
+main() {
+    local temp_hwmon fan_hwmon temp_raw temp pwm log_counter=0 log_interval=60
+    
+    # Load configuration
+    load_config
+    
+    # Calculate log interval (log every ~60 seconds)
+    log_interval=$((60 / INTERVAL))
+    [ "$log_interval" -lt 1 ] && log_interval=1
+    
+    # Find devices
+    temp_hwmon=$(find_temp_sensor)
+    fan_hwmon=$(find_fan_controller)
+    
+    if [ -z "$temp_hwmon" ]; then
+        logger -t fancontrol "ERROR: Could not find temperature sensor"
+        exit 1
+    fi
+    
+    if [ -z "$fan_hwmon" ]; then
+        logger -t fancontrol "ERROR: Could not find EMC2305 fan controller"
+        exit 1
+    fi
+    
+    logger -t fancontrol "Started: temp=$temp_hwmon fan=$fan_hwmon"
+    logger -t fancontrol "Range: ${MINTEMP}C-${MAXTEMP}C -> PWM ${MINPWM}-${MAXPWM}"
+    logger -t fancontrol "Interval: ${INTERVAL}s, log every ~60s"
+    
+    while true; do
+        # Read temperature (in millidegrees)
+        temp_raw=$(get_temperature "$temp_hwmon")
+        
+        if [ -z "$temp_raw" ]; then
+            logger -t fancontrol "WARNING: Could not read temperature, setting fan to max"
+            set_pwm "$fan_hwmon" $MAXPWM
+            sleep $INTERVAL
+            log_counter=$((log_counter + 1))
+            continue
+        fi
+        
+        # Convert millidegrees to degrees
+        temp=$((temp_raw / 1000))
+        
+        # Calculate and apply PWM
+        pwm=$(calc_pwm $temp)
+        set_pwm "$fan_hwmon" $pwm
+        
+        # Log every ~60 seconds based on configured interval
+        log_counter=$((log_counter + 1))
+        if [ $((log_counter % log_interval)) -eq 0 ]; then
+            logger -t fancontrol "Temp: ${temp}C -> PWM: ${pwm}"
+        fi
+        
+        sleep $INTERVAL
+    done
+}
+
+# Handle arguments
+case "$1" in
+    start|stop|restart|reload)
+        echo "fancontrol: $1 not supported, run as daemon"
+        exit 1
+        ;;
+    *)
+        main
+        ;;
+esac
