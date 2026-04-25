@@ -18,7 +18,7 @@ define Package/fancontrol
   CATEGORY:=Utilities
   TITLE:=Fan control daemon for EMC2305
   URL:=https://openwrt.org/
-  DEPENDS:=+kmod-hwmon-core +kmod-hwmon-emc2305 +kmod-hwmon-tmp421
+  DEPENDS:=+kmod-hwmon-core +kmod-hwmon-emc2305 +kmod-hwmon-tmp401
   MAINTAINER:=Mono Technologies Inc.
 endef
 
