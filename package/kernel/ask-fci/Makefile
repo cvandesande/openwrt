@@ -10,9 +10,14 @@ include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=ask-fci
 PKG_VERSION:=9.00.12
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
-PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
+PKG_SOURCE_PROTO:=git
+PKG_SOURCE_URL:=https://github.com/cvandesande/fci.git
+PKG_SOURCE_VERSION:=655983ec1e5bbc7c2892ac5c35fb431b97d05c00
+PKG_SOURCE_SUBDIR:=fci-source-$(PKG_VERSION)
+PKG_MIRROR_HASH:=65ebd6f2a97186e602fc47a50e40eb4f33f234f21273eabc877a6377b06d36f4
+PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
 PKG_LICENSE:=GPL-2.0-or-later
 PKG_LICENSE_FILES:=COPYING.GPL
@@ -23,7 +28,8 @@ define KernelPackage/ask-fci
   SUBMENU:=Network Devices
   TITLE:=NXP ASK FCI fast path control interface
   DEPENDS:=@TARGET_layerscape +kmod-ask-cdx
-  FILES:=$(PKG_BUILD_DIR)/fci.ko
+  FILES:=$(PKG_BUILD_DIR)/fci-$(PKG_VERSION)/fci.ko
+  URL:=https://github.com/cvandesande/fci
 endef
 
 define KernelPackage/ask-fci/description
@@ -31,13 +37,7 @@ define KernelPackage/ask-fci/description
   the CMM daemon. Part of the NXP Application Solutions Kit (ASK).
 endef
 
-FCI_DIR:=$(PKG_BUILD_DIR)
-
-define Build/Prepare
-	rm -rf $(PKG_BUILD_DIR)
-	mkdir -p $(PKG_BUILD_DIR)
-	$(CP) ./src/. $(PKG_BUILD_DIR)/
-endef
+FCI_DIR:=$(PKG_BUILD_DIR)/fci-$(PKG_VERSION)
 
 define Build/Compile
 	$(KERNEL_MAKE) \
