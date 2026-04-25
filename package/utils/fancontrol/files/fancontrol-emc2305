@@ -52,12 +52,12 @@ find_temp_sensor() {
     local hwmon=$(find_hwmon_by_name "cluster_thermal")
     [ -n "$hwmon" ] && echo "$hwmon" && return
     
-    # Try tmp421 sensors
-    hwmon=$(find_hwmon_by_name "tmp421")
+    # Try tmp431 sensors
+    hwmon=$(find_hwmon_by_name "tmp431")
     [ -n "$hwmon" ] && echo "$hwmon" && return
     
     # Try by compatible
-    hwmon=$(find_hwmon_by_compatible "ti,tmp421")
+    hwmon=$(find_hwmon_by_compatible "ti,tmp431")
     [ -n "$hwmon" ] && echo "$hwmon" && return
     
     return 1
