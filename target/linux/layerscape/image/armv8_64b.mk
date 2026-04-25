@@ -384,8 +384,8 @@ define Device/mono_gateway-dk
   KERNEL := kernel-bin | gzip | fit gzip $$(DEVICE_DTS_DIR)/$$(DEVICE_DTS).dtb
   FILESYSTEMS := ext4
   IMAGES := rootfs.ext4 sysupgrade.bin
-  IMAGE/rootfs.ext4 := mono-mkfs-ext4 | mono-add-kernel
-  IMAGE/sysupgrade.bin := mono-mkfs-ext4 | mono-add-kernel | append-metadata
+   IMAGE/rootfs.ext4 := mono-mkfs-ext4 | mono-add-kernel | mono-add-fman
+   IMAGE/sysupgrade.bin := mono-mkfs-ext4 | mono-add-kernel | mono-add-fman | append-metadata
   SUPPORTED_DEVICES := mono,gateway-dk
   DEVICE_PACKAGES += \
     kmod-leds-lp5812 \
@@ -398,7 +398,8 @@ define Device/mono_gateway-dk
     kmod-sfp-led \
     kmod-leds-gpio \
     kmod-hwmon-emc2305 \
-    fancontrol
+    fancontrol \
+    layerscape-fman
 endef
 TARGET_DEVICES += mono_gateway-dk
 
