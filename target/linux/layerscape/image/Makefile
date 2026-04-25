@@ -94,6 +94,12 @@ define Build/mono-add-kernel
 	debugfs -w -R "write $(IMAGE_KERNEL) boot/kernel.itb" $@
 endef
 
+# Add FMAN firmware to ext4 rootfs at /boot/fman-ucode.bin for 10G Ethernet (mono_gateway-dk)
+define Build/mono-add-fman
+	debugfs -w -R "mkdir boot" $@ 2>/dev/null || true
+	debugfs -w -R "write $(STAGING_DIR_IMAGE)/fsl_ls1046a-rdb-fman.bin boot/fman-ucode.bin" $@
+endef
+
 include $(SUBTARGET).mk
 
 $(eval $(call BuildImage))
