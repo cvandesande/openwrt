@@ -391,7 +391,7 @@ define Device/mono_gateway-dk
     kmod-leds-lp5812 \
     kmod-i2c-mux-pca954x \
     kmod-hwmon-ina2xx \
-    kmod-hwmon-tmp421 \
+    kmod-hwmon-tmp401 \
     kmod-thermal \
     kmod-rtc-pcf2127 \
     kmod-sfp \

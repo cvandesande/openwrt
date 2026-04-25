@@ -178,7 +178,7 @@
 			reg = <1>;
 
 			temp-sensor@4c {
-				compatible = "ti,tmp421";
+				compatible = "ti,tmp431";
 				reg = <0x4c>;
 			};
 		};
@@ -189,7 +189,7 @@
 			reg = <2>;
 
 			temp-sensor@4c {
-				compatible = "ti,tmp421";
+				compatible = "ti,tmp431";
 				reg = <0x4c>;
 			};
 		};
@@ -315,9 +315,9 @@
 			#size-cells = <0>;
 			reg = <2>;
 
-			rtc@51 {
-				compatible = "nxp,pcf2127";
-				reg = <0x51>;
+			rtc@53 {
+				compatible = "nxp,pcf2131";
+				reg = <0x53>;
 				status = "okay";
 			};
 
