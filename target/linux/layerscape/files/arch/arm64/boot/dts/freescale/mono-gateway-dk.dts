@@ -477,10 +477,11 @@
 		pcs-handle-names = "xfi";
 	};
 
-	fm1_mac10: ethernet@f2000 { /* 10GEC2 */
+ fm1_mac10: ethernet@f2000 { /* 10GEC2 */
 		sfp = <&sfp_xfi1>;
 		phy-connection-type = "10gbase-r";
 		managed = "in-band-status";
+		pcs-handle-names = "xfi";
 	};
 	
 	mdio@fc000 {
