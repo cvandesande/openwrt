@@ -9,9 +9,14 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=libfci
 PKG_VERSION:=9.00.12
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
-PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
+PKG_SOURCE_PROTO:=git
+PKG_SOURCE_URL:=https://github.com/cvandesande/fci.git
+PKG_SOURCE_VERSION:=655983ec1e5bbc7c2892ac5c35fb431b97d05c00
+PKG_SOURCE_SUBDIR:=fci-source-$(PKG_VERSION)
+PKG_MIRROR_HASH:=65ebd6f2a97186e602fc47a50e40eb4f33f234f21273eabc877a6377b06d36f4
+PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
 PKG_LICENSE:=GPL-2.0-or-later
 PKG_LICENSE_FILES:=COPYING.GPL
@@ -27,7 +32,7 @@ define Package/libfci
   CATEGORY:=Libraries
   TITLE:=NXP ASK FCI userspace library
   DEPENDS:=@TARGET_layerscape
-  URL:=https://github.com/we-are-mono/ASK
+  URL:=https://github.com/cvandesande/fci
 endef
 
 define Package/libfci/description
@@ -35,15 +40,12 @@ define Package/libfci/description
   Part of the NXP Application Solutions Kit (ASK).
 endef
 
-define Build/Prepare
-	rm -rf $(PKG_BUILD_DIR)
-	mkdir -p $(PKG_BUILD_DIR)
-	$(CP) ./src/. $(PKG_BUILD_DIR)/
-endef
+CONFIGURE_PATH:=fci-$(PKG_VERSION)/lib
+MAKE_PATH:=fci-$(PKG_VERSION)/lib
 
 define Build/InstallDev
 	$(INSTALL_DIR) $(1)/usr/include
-	$(CP) $(PKG_BUILD_DIR)/include/libfci.h $(1)/usr/include/
+	$(CP) $(PKG_BUILD_DIR)/fci-$(PKG_VERSION)/lib/include/libfci.h $(1)/usr/include/
 
 	$(INSTALL_DIR) $(1)/usr/lib
 	$(CP) $(PKG_INSTALL_DIR)/usr/lib/libfci.{so*,a,la} $(1)/usr/lib/
