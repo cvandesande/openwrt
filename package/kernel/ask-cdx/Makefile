@@ -10,9 +10,14 @@ include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=ask-cdx
 PKG_VERSION:=5.03.1
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 
-PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
+PKG_SOURCE_PROTO:=git
+PKG_SOURCE_URL:=https://github.com/cvandesande/ask-cdx.git
+PKG_SOURCE_VERSION:=43e3f19a127e2d45dd4c0b0376a6d18db06cf863
+PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
+PKG_MIRROR_HASH:=9545bb8056cc9d906adf1d0df766d818760e5664045e1cde55b861eb60500145
+PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
 PKG_LICENSE:=GPL-2.0-or-later
 PKG_LICENSE_FILES:=COPYING.GPL
@@ -23,7 +28,8 @@ define KernelPackage/ask-cdx
   SUBMENU:=Network Devices
   TITLE:=NXP ASK CDX fast path module
   DEPENDS:=@TARGET_layerscape
-  FILES:=$(PKG_BUILD_DIR)/cdx.ko
+  FILES:=$(PKG_BUILD_DIR)/cdx-$(PKG_VERSION)/cdx.ko
+  URL:=https://github.com/cvandesande/ask-cdx
 endef
 
 define KernelPackage/ask-cdx/description
@@ -32,13 +38,7 @@ define KernelPackage/ask-cdx/description
   Solutions Kit (ASK).
 endef
 
-CDX_DIR:=$(PKG_BUILD_DIR)
-
-define Build/Prepare
-	rm -rf $(PKG_BUILD_DIR)
-	mkdir -p $(PKG_BUILD_DIR)
-	$(CP) ./src/. $(PKG_BUILD_DIR)/
-endef
+CDX_DIR:=$(PKG_BUILD_DIR)/cdx-$(PKG_VERSION)
 
 # Keep Stage 2 on the wired first-class only. WiFi and IPsec stay on their
 # later milestones and are compiled in only when their flags are re-enabled.
@@ -57,7 +57,7 @@ endef
 
 define Build/InstallDev
 	$(INSTALL_DIR) $(1)/usr/include/cdx
-	$(CP) $(PKG_SYMVERS_DIR)/$(PKG_NAME).symvers $(1)/usr/include/cdx/Module.symvers
+	$(CP) $(CDX_DIR)/Module.symvers $(1)/usr/include/cdx/Module.symvers
 	$(CP) $(CDX_DIR)/cdx_ioctl.h $(1)/usr/include/cdx/
 endef
 
