@@ -1,0 +1,23 @@
+# Minimal seed for the current Mono Gateway DK image.
+#
+# Expand this into a full .config with:
+#   cp config/mono_gateway-dk.seed .config
+#   make defconfig
+#
+# The mono_gateway-dk device profile pulls the board support packages needed
+# for the current platform image, including LEDs, thermal/hwmon support, SFP,
+# and fan control. This seed adds the explicit package selections needed for
+# the currently delivered ASK dataplane/control-path stack, PPPoE, and LuCI.
+
+CONFIG_TARGET_layerscape=y
+CONFIG_TARGET_layerscape_armv8_64b=y
+CONFIG_TARGET_layerscape_armv8_64b_DEVICE_mono_gateway-dk=y
+
+CONFIG_PACKAGE_ask-cmm=y
+CONFIG_PACKAGE_ask-dpa-app=y
+CONFIG_PACKAGE_kmod-ask-fci=y
+
+CONFIG_PACKAGE_luci=y
+
+CONFIG_PACKAGE_ppp=y
+CONFIG_PACKAGE_ppp-mod-pppoe=y
