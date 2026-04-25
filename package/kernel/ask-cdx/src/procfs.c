@@ -25,48 +25,64 @@ static ssize_t proc_fqid_stats_read(struct file *fp, char __user *buff, size_t s
 	struct qm_mcr_queryfq_np np;
 	struct qm_fqd fqd_inst,*fqd;
 	struct fqid_file_list_node_s *node;
+	char *kbuf;
 	int len = 0;
-	uint8_t *name;
+	ssize_t ret;
+	const char *name;
 
-	name = (uint8_t *)fp->f_path.dentry->d_name.name;
+	kbuf = kzalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
 
-	if (*ppos)
-		return 0;
+	name = fp->f_path.dentry->d_name.name;
 
 	node = pde_data(file_inode(fp));
-	printk("%s()::%d node %p\n", __func__, __LINE__, node);
 
 	if (!node || !node->fq)
 	{
-		len += sprintf(buff, "===========================================\n::file %s\n", name);
-		len += sprintf(buff + len, "corresponding FQ ID not created by CDX module\n");
-		*ppos +=len;
-		return len;
+		len += scnprintf(kbuf + len, PAGE_SIZE - len,
+				 "===========================================\n::file %s\n",
+				 name);
+		len += scnprintf(kbuf + len, PAGE_SIZE - len,
+				 "corresponding FQ ID not created by CDX module\n");
+		goto out;
 	}
 
 	fq_info = node->fq;		
-	len += sprintf(buff, "===========================================\n::fqid %x(%d)\n", node->fqid, node->fqid);
+	len += scnprintf(kbuf + len, PAGE_SIZE - len,
+			 "===========================================\n::fqid %x(%d)\n",
+			 node->fqid, node->fqid);
 	if (qman_query_fq(fq_info, &fqd_inst)) {
-		len += sprintf(buff + len, "error getting fq fields\n");
-		*ppos +=len;
-		return len;
+		len += scnprintf(kbuf + len, PAGE_SIZE - len,
+				 "error getting fq fields\n");
+		goto out;
 	}
 	fqd = &fqd_inst;
-	len += sprintf(buff+len, "fqctrl\t%x\n", fqd->fq_ctrl);
-	len += sprintf(buff+len, "channel\t%x\n", fqd->dest.channel);
-	len += sprintf(buff+len, "Wq\t%d\n", fqd->dest.wq);
-	len += sprintf(buff+len, "contextb\t%x\n", fqd->context_b);
-	len += sprintf(buff+len, "contexta\t%p\n", (void *)fqd->context_a.opaque);
+	len += scnprintf(kbuf + len, PAGE_SIZE - len, "fqctrl\t%x\n",
+			 fqd->fq_ctrl);
+	len += scnprintf(kbuf + len, PAGE_SIZE - len, "channel\t%x\n",
+			 fqd->dest.channel);
+	len += scnprintf(kbuf + len, PAGE_SIZE - len, "Wq\t%d\n",
+			 fqd->dest.wq);
+	len += scnprintf(kbuf + len, PAGE_SIZE - len, "contextb\t%x\n",
+			 fqd->context_b);
+	len += scnprintf(kbuf + len, PAGE_SIZE - len, "contexta\t%p\n",
+			 (void *)fqd->context_a.opaque);
 	if (qman_query_fq_np(fq_info, &np)) {
-		len += sprintf(buff + len, "error getting fq fields\n");
-		*ppos +=len;
-		return len;
+		len += scnprintf(kbuf + len, PAGE_SIZE - len,
+				 "error getting fq fields\n");
+		goto out;
 	}
-	len += sprintf(buff+len, "state\t%d\n", np.state);
-	len += sprintf(buff+len, "byte count\t%d\n", np.byte_cnt);
-	len += sprintf(buff+len, "frame count\t%d\n", np.frm_cnt);
-	*ppos +=len;
-	return len;
+	len += scnprintf(kbuf + len, PAGE_SIZE - len, "state\t%d\n", np.state);
+	len += scnprintf(kbuf + len, PAGE_SIZE - len, "byte count\t%d\n",
+			 np.byte_cnt);
+	len += scnprintf(kbuf + len, PAGE_SIZE - len, "frame count\t%d\n",
+			 np.frm_cnt);
+
+out:
+	ret = simple_read_from_buffer(buff, size, ppos, kbuf, len);
+	kfree(kbuf);
+	return ret;
 }
 
 static const struct proc_ops proc_fqid_stats = {
