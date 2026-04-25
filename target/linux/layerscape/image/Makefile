@@ -80,6 +80,20 @@ define Device/rework-sdcard-images
 	It is required to flash the entire sd-card again and manually copy config.
 endef
 
+# Create ext4 rootfs with resize_inode support (Mono Gateway only)
+define Build/mono-mkfs-ext4
+	$(TOPDIR)/target/linux/layerscape/image/gen_ext4_resizable.sh \
+		$@ $(ROOTFS_PARTSIZE) $(CONFIG_TARGET_EXT4_BLOCKSIZE) \
+		$(TARGET_DIR) \
+		$(if $(CONFIG_TARGET_EXT4_RESERVED_PCT),$(CONFIG_TARGET_EXT4_RESERVED_PCT),0)
+endef
+
+# Add kernel.itb to ext4 rootfs at /boot/kernel.itb
+define Build/mono-add-kernel
+	debugfs -w -R "mkdir boot" $@ 2>/dev/null || true
+	debugfs -w -R "write $(IMAGE_KERNEL) boot/kernel.itb" $@
+endef
+
 include $(SUBTARGET).mk
 
 $(eval $(call BuildImage))
