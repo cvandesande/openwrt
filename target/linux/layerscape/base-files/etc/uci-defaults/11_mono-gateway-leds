@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# Mono Gateway Development Kit - LED Configuration
+#
+# Status LEDs (LP5812 I2C controller):
+#   status:white - Main status LED (dim, static)
+#   status:blue  - Reserved
+#   status:green - Off (U-Boot leaves it on)
+#   status:red   - Reserved
+#
+
+# Only apply to Mono Gateway
+case "$(cat /tmp/sysinfo/model 2>/dev/null)" in
+	"Mono Gateway Development Kit")
+		;;
+	*)
+		exit 0
+		;;
+esac
+
+uci batch <<'EOF'
+# Turn off green LED (left on by U-Boot)
+set system.led_green=led
+set system.led_green.name='Green Off'
+set system.led_green.sysfs='status:green'
+set system.led_green.trigger='none'
+set system.led_green.default='0'
+
+# Set white LED as static status at 25% brightness
+set system.led_status=led
+set system.led_status.name='Status'
+set system.led_status.sysfs='status:white'
+set system.led_status.trigger='none'
+set system.led_status.default='1'
+set system.led_status.brightness='16'
+EOF
+
+uci commit system
+
+exit 0

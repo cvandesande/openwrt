@@ -375,6 +375,33 @@ define Device/fsl_lx2160a-rdb-sdboot
 endef
 TARGET_DEVICES += fsl_lx2160a-rdb-sdboot
 
+define Device/mono_gateway-dk
+  DEVICE_VENDOR := Mono Technologies Inc.
+  DEVICE_MODEL := Gateway Development Kit
+  DEVICE_DTS := mono-gateway-dk
+  DEVICE_DTS_DIR := $(DTS_DIR)/freescale
+  KERNEL_LOADADDR := 0x80000000
+  KERNEL := kernel-bin | gzip | fit gzip $$(DEVICE_DTS_DIR)/$$(DEVICE_DTS).dtb
+  FILESYSTEMS := ext4
+  IMAGES := rootfs.ext4 sysupgrade.bin
+  IMAGE/rootfs.ext4 := mono-mkfs-ext4 | mono-add-kernel
+  IMAGE/sysupgrade.bin := mono-mkfs-ext4 | mono-add-kernel | append-metadata
+  SUPPORTED_DEVICES := mono,gateway-dk
+  DEVICE_PACKAGES += \
+    kmod-leds-lp5812 \
+    kmod-i2c-mux-pca954x \
+    kmod-hwmon-ina2xx \
+    kmod-hwmon-tmp421 \
+    kmod-thermal \
+    kmod-rtc-pcf2127 \
+    kmod-sfp \
+    kmod-sfp-led \
+    kmod-leds-gpio \
+    kmod-hwmon-emc2305 \
+    fancontrol
+endef
+TARGET_DEVICES += mono_gateway-dk
+
 define Device/traverse_ten64-mtd
   DEVICE_VENDOR := Traverse
   DEVICE_MODEL := Ten64 (NAND boot)
@@ -405,4 +432,3 @@ define Device/traverse_ten64-mtd
   SUPPORTED_DEVICES = traverse,ten64
 endef
 TARGET_DEVICES += traverse_ten64-mtd
-

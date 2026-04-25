@@ -52,7 +52,9 @@ for json_file in work_dir.glob("*.json"):
     if device_id not in output["profiles"]:
         output["profiles"][device_id] = profile
     else:
-        output["profiles"][device_id]["images"].extend(profile["images"])
+        existing_images = output["profiles"][device_id].get("images", [])
+        output["profiles"][device_id] = profile
+        output["profiles"][device_id]["images"] = existing_images + profile["images"]
 
 # make image lists unique by name, keep last/latest
 for device_id, profile in output.get("profiles", {}).items():
