@@ -179,4 +179,4 @@ Those docs cover:
 - stage status
 - observability and proof model
 - remaining work
-- nightly tracking-branch automation
+- nightly tracking-branch automation, smoke testing, and manual promotion
