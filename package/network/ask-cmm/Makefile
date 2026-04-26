@@ -13,6 +13,8 @@ PKG_RELEASE:=5
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/cvandesande/ask-cmm.git
+# When PKG_SOURCE_VERSION changes, run this and update PKG_MIRROR_HASH:
+#   scripts/mono-check-vendor-hashes.sh package/network/ask-cmm
 PKG_SOURCE_VERSION:=80d43ab8b25dcd627c68e22c81b9e35a8f562487
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
 PKG_MIRROR_HASH:=efbc4f7cce00642b2e016926709021ff15fd022c144fea32c35953b89e61d166
