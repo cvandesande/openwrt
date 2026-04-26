@@ -344,6 +344,9 @@ struct dpa_percpu_priv_s {
 	u64 tx_caam_enc;
 	u64 tx_caam_dec;
 #endif
+#ifdef CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER
+	u64 ask_ceetm_tx_drops;
+#endif
 	struct rtnl_link_stats64 stats;
 	struct dpa_rx_errors rx_errors;
 	struct dpa_ern_cnt ern_cnt;
@@ -421,9 +424,10 @@ struct dpa_priv_s {
 	int loop_id;
 	int loop_to;
 #endif
-#if defined(CONFIG_FSL_DPAA_CEETM) || defined(CONFIG_CPE_FAST_PATH)
+#if defined(CONFIG_FSL_DPAA_CEETM) || defined(CONFIG_CPE_FAST_PATH) || \
+	defined(CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER)
 	bool ceetm_en; /* CEETM QoS enabled */
-#ifdef CONFIG_CPE_FAST_PATH
+#if defined(CONFIG_CPE_FAST_PATH) || defined(CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER)
 	void *qm_ctx;  /* CEETM context */
 #endif
 #endif
