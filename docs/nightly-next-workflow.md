@@ -99,6 +99,108 @@ build fails, the `*-next` branches keep their previous remote values.
 Build logs, `.config`, and target output under
 `bin/targets/layerscape/armv8_64b/` are uploaded as workflow artifacts.
 
+## Smoke Testing mono-ask-next
+
+The nightly workflow proves that the rebased `mono-ask-next` candidate builds.
+It does not prove hardware behavior and must not be treated as validation by
+itself.
+
+Use the latest successful `Nightly Next Branch Build` run on the default
+branch as the source of truth for a candidate. The run summary records the
+`main`, `mono-oss-next`, and `mono-ask-next` SHAs. Download the
+`mono-ask-next-firmware` artifact from that same run, and keep the
+`mono-ask-next-build-logs` artifact with the test record.
+
+Before flashing, record the exact candidate and artifact checksum:
+
+```sh
+git fetch origin
+git rev-parse origin/mono-oss-next
+git rev-parse origin/mono-ask-next
+find . -name '*mono_gateway-dk*sysupgrade*' -type f -exec sha256sum {} +
+```
+
+Flash only a lab or otherwise controlled Mono Gateway first. On the target,
+make a config backup before testing the sysupgrade path:
+
+```sh
+IMAGE=/tmp/openwrt-layerscape-armv8_64b-mono_gateway-dk-ext4-sysupgrade.bin.gz
+sysupgrade -b /tmp/pre-mono-ask-next-backup.tar.gz
+sysupgrade "$IMAGE"
+```
+
+Use `sysupgrade -n` only when deliberately testing a clean-config boot. The
+normal promotion smoke test should exercise the expected upgrade path and known
+test configuration.
+
+After boot, the minimum smoke test is:
+
+- Confirm the device boots the tested image and stays reachable over the
+  management path.
+- Confirm `/etc/openwrt_release`, `uname -a`, and the recorded branch SHA or
+  artifact checksum match the candidate under test.
+- Confirm the expected packages are installed with
+  `opkg list-installed | grep -E 'ask-cmm|ask-dpa-app|ask-fci|ask-cdx|libfci'`.
+- Confirm the ASK services/modules needed for this image are present with
+  `ls -l /etc/init.d/cdx /etc/init.d/fci /etc/init.d/cmm`,
+  `lsmod | grep -E '^(cdx|fci)'`, `pgrep -a cmm`, and `cmm -c "help"`.
+- Confirm the expected LAN/WAN interfaces, routes, and DNS behavior with
+  `ip -br link`, `ip route`, and controlled ping or traffic tests from the lab
+  topology.
+- Check boot and runtime logs with
+  `logread | grep -Ei 'ask|cdx|cmm|fci|dpaa|fman|ceetm|error|fail|warn'` and
+  `dmesg | grep -Ei 'ask|cdx|cmm|fci|dpaa|fman|ceetm|error|fail|warn'`.
+- Re-run the currently validated 1G routed WAN and upload-side CEETM checks
+  that are in scope for the release being promoted.
+
+For offload claims, follow the proof model in
+`docs/02-fast-path-architecture.md` and `docs/03-fman-backend-design.md`.
+Control-plane installed state alone is not enough; keep traffic-generator
+results, relevant `cmm` output, hardware counters, and CPU-path observations
+with the test record.
+
+Record at least the workflow run, candidate SHAs, firmware checksum, device
+serial, test configuration, topology, pass/fail result, and any deviations. If
+any smoke test fails, do not promote the `*-next` branches.
+
+## Promoting Tested Next Branches
+
+Promotion is manual. The nightly workflow never moves `mono-oss` or
+`mono-ask`, never tags nightly runs, and never claims that a successful build is
+hardware validation.
+
+Promote only after the matching `mono-ask-next` firmware has passed the smoke
+tests above. Promote `mono-oss` first, then `mono-ask`, because
+`mono-ask-next` is rebased on top of `mono-oss-next`.
+
+Use fast-forward-only promotion from the tested next branches:
+
+```sh
+git fetch origin
+
+git switch mono-oss
+git pull --ff-only origin mono-oss
+git merge --ff-only origin/mono-oss-next
+git push origin mono-oss
+
+git switch mono-ask
+git pull --ff-only origin mono-ask
+git merge --ff-only origin/mono-ask-next
+git push origin mono-ask
+```
+
+If either `merge --ff-only` fails, stop. That means the validated branch is not
+an ancestor of the tested next branch or the local branch is not current. Do
+not force-push `mono-oss` or `mono-ask` to make promotion work.
+
+After promotion, trigger a manual `Nightly Next Branch Build` run or wait for
+the next scheduled run. The next run should rebuild `mono-oss-next` and
+`mono-ask-next` from the newly promoted validated branches.
+
+Create a tag only if you intentionally want to mark a validated release point.
+Nightly automation must not create tags, and a tag should refer to the tested
+validated branch SHA, not to an untested intermediate result.
+
 ## Security Model
 
 The workflow separates branch mutation from build execution:
