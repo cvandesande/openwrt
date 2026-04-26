@@ -6,6 +6,8 @@ today:
 - a boxed NXP ASK/FMAM/DPAA hardware-acceleration port for Mono Gateway
 - an OpenWrt-first integration repo with pinned vendor package sources
 - a staged validation path from kernel bring-up to true hardware offload
+- the bounded upload-side CEETM hardware egress-shaping proof on the current
+  WAN path
 
 Read in this order:
 
