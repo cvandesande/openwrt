@@ -164,6 +164,7 @@ More detail lives in:
 - [docs/01-platform-and-lab-state.md](docs/01-platform-and-lab-state.md)
 - [docs/02-fast-path-architecture.md](docs/02-fast-path-architecture.md)
 - [docs/03-fman-backend-design.md](docs/03-fman-backend-design.md)
+- [docs/nightly-next-workflow.md](docs/nightly-next-workflow.md)
 
 Those docs cover:
 
@@ -175,6 +176,7 @@ Those docs cover:
 - remaining work
 - local `clangd` and `compile_commands.json` developer workflow
   ([docs/04-developer-tooling.md](docs/04-developer-tooling.md))
+- nightly tracking-branch automation
 
 SELinux support is included for the Mono Gateway DK image, with policy kept in
 the OpenWrt package layer and shaped by observed access rather than broad
