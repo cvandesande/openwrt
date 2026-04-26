@@ -74,7 +74,7 @@ static dpaa_eth_bpool_replenish_hook_t dpaa_eth_bpool_replenish_hook;
 #endif
 
 /* registered function to get ceetm Fqs */
-#ifdef CONFIG_CPE_FAST_PATH
+#if defined(CONFIG_CPE_FAST_PATH) || defined(CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER)
 static cdx_get_ceetm_egressfq ceetm_fqget_func;
 static cdx_get_ceetm_dscp_fq ceetm_dscp_fqget_func;
 /* This function registers two cdx functions, which are to get the egress fq. 
@@ -2141,6 +2141,59 @@ no_sec_submit:
 }
 #endif
 
+#ifdef CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER
+#define ASK_CEETM_DEFAULT_CLASS_QUEUE	0
+
+static void ask_ceetm_tx_drop(struct dpa_priv_s *priv, struct sk_buff *skb)
+{
+	struct dpa_percpu_priv_s *percpu_priv;
+
+	percpu_priv = raw_cpu_ptr(priv->percpu_priv);
+	percpu_priv->ask_ceetm_tx_drops++;
+	percpu_priv->stats.tx_errors++;
+	percpu_priv->stats.tx_dropped++;
+	dev_kfree_skb(skb);
+}
+
+static int ask_ceetm_tx(struct sk_buff *skb, struct net_device *net_dev)
+{
+	struct dpa_priv_s *priv = netdev_priv(net_dev);
+	struct qman_fq *egress_fq, *conf_fq;
+	int class_queue = ASK_CEETM_DEFAULT_CLASS_QUEUE;
+	int tx_queue;
+
+	tx_queue = dpa_get_queue_mapping(skb);
+	if (unlikely(tx_queue >= DPAA_ETH_TX_QUEUES))
+		tx_queue = tx_queue % DPAA_ETH_TX_QUEUES;
+
+	if (!priv->ceetm_en) {
+		egress_fq = priv->egress_fqs[tx_queue];
+		goto enqueue;
+	}
+
+	if (!ceetm_fqget_func || !priv->qm_ctx) {
+		if (net_ratelimit())
+			netdev_err(net_dev, "ASK CEETM TX owner missing FQ callback/context\n");
+		ask_ceetm_tx_drop(priv, skb);
+		return NETDEV_TX_OK;
+	}
+
+	/* Linux TX has no CDX QoS mark; use the default CEETM class queue. */
+	egress_fq = ceetm_fqget_func(priv->qm_ctx, 0, class_queue, 0);
+	if (!egress_fq) {
+		if (net_ratelimit())
+			netdev_err(net_dev, "ASK CEETM TX owner could not resolve class queue %d\n",
+				   class_queue);
+		ask_ceetm_tx_drop(priv, skb);
+		return NETDEV_TX_OK;
+	}
+
+enqueue:
+	conf_fq = priv->conf_fqs[tx_queue & (DPAA_ETH_TX_QUEUES - 1)];
+	return dpa_tx_extended(skb, net_dev, egress_fq, conf_fq);
+}
+#endif
+
 static inline void skb_reset_truesize(struct sk_buff *skb, unsigned int size)
 {
 	size -= SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
@@ -2185,6 +2238,11 @@ int __hot dpa_tx(struct sk_buff *skb, struct net_device *net_dev)
 #endif
 
 	priv = netdev_priv(net_dev);
+
+#ifdef CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER
+	if (priv->ceetm_en)
+		return ask_ceetm_tx(skb, net_dev);
+#endif
 
 #ifdef CONFIG_FSL_DPAA_CEETM
 	if (priv->ceetm_en)

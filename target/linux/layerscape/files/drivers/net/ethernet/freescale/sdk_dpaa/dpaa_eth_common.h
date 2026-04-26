@@ -106,7 +106,7 @@ int dpaa_ipsec_release_compound_reclaim_ctx(const struct qm_fd *fd);
 
 #endif
 
-#ifdef CONFIG_CPE_FAST_PATH
+#if defined(CONFIG_CPE_FAST_PATH) || defined(CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER)
 typedef struct qman_fq *(*cdx_get_ceetm_egressfq)(void *, uint32_t chnl_id, uint32_t queue, uint32_t ff);
 typedef struct qman_fq *(*cdx_get_ceetm_dscp_fq)(void *, uint8_t dscp);
 int dpa_register_ceetm_get_egress_fq(cdx_get_ceetm_egressfq egress_fq_func, cdx_get_ceetm_dscp_fq dscp_fq_func);
@@ -233,7 +233,8 @@ void count_ern(struct dpa_percpu_priv_s *percpu_priv,
 		      const struct qm_mr_entry *msg);
 int dpa_enable_tx_csum(struct dpa_priv_s *priv,
 	struct sk_buff *skb, struct qm_fd *fd, char *parse_results);
-#if defined(CONFIG_FSL_DPAA_CEETM) || defined(CONFIG_CPE_FAST_PATH)
+#if defined(CONFIG_FSL_DPAA_CEETM) || defined(CONFIG_CPE_FAST_PATH) || \
+	defined(CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER)
 void dpa_enable_ceetm(struct net_device *dev);
 void dpa_disable_ceetm(struct net_device *dev);
 #endif
