@@ -1904,7 +1904,8 @@ return_error:
 }
 EXPORT_SYMBOL(dpa_enable_tx_csum);
 
-#if defined(CONFIG_FSL_DPAA_CEETM) || defined(CONFIG_CPE_FAST_PATH)
+#if defined(CONFIG_FSL_DPAA_CEETM) || defined(CONFIG_CPE_FAST_PATH) || \
+	defined(CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER)
 void dpa_enable_ceetm(struct net_device *dev)
 {
 	struct dpa_priv_s *priv = netdev_priv(dev);
