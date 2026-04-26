@@ -32,6 +32,8 @@ Completed:
   WAN path
 - [x] direct-routed production-path and reply-half proof on a validated 1G
   production path
+- [x] first upload-side CEETM hardware egress-shaping proof on the current
+  validated WAN path
 
 Remaining work:
 
@@ -43,7 +45,9 @@ Remaining work:
 - [ ] production-ready hardware QoS controls
 - [ ] Stage 6 soak and repeatability
 
-The current validated scope is 1G-only.
+The current validated scope is 1G-only, with upload-side CEETM egress shaping
+validated only on the current WAN path. This is not a CAKE/SQM-equivalent or
+download-side bufferbloat-control claim.
 
 ## How This Fork Differs From Vendor Firmware
 
@@ -95,6 +99,7 @@ In practice, that means:
   rather than treating installed state alone as success
 - proven 1G hardware-offload on validated preferred and production routed WAN
   classes
+- proven upload-side CEETM hardware egress shaping on the current WAN path
 
 ## Building
 
