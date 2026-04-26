@@ -40,6 +40,87 @@ The active hardware-acceleration plane is built from:
 These components own fast-path programming and resident hardware forwarding for
 the supported classes.
 
+## Life Of A Stream
+
+A new stream starts in Linux, not in the hardware fast path. The first packets
+enter through FMAN/DPAA, are delivered to the Linux netdev path, and Linux
+makes the authoritative decisions: conntrack creates the tuple, firewall and
+NAT apply policy, routing selects egress, PPPoE/VLAN state defines
+encapsulation, and neighbour state provides the next-hop MAC.
+
+`ask-cmm` learns from those Linux state changes. It listens to conntrack,
+route, neighbour, and interface state, then builds the hardware view for
+eligible flows: original tuple, reply tuple, route IDs, input/output devices,
+underlying bridge/VLAN data, next-hop MAC, NAT tuple, PPPoE/VLAN rewrite
+shape, and enabled directions.
+
+```mermaid
+sequenceDiagram
+    participant Wire as Wire / NIC
+    participant DPAA as FMAN + DPAA RX
+    participant Linux as Linux netdev + netfilter
+    participant CT as Linux conntrack
+    participant CMM as ask-cmm
+    participant FCI as ask-fci / libfci
+    participant CDX as ask-cdx
+    participant HW as FMAN / PCD / QMan / BMan
+    participant CEETM as CEETM shaper
+
+    Wire->>DPAA: first packet arrives
+    DPAA->>Linux: no hardware CT yet, deliver to kernel
+    Linux->>CT: create or update conntrack tuple
+    Linux->>Linux: firewall, NAT, route, PPPoE/VLAN, neighbour decisions
+    CT-->>CMM: NFCT NEW/UPDATE event
+    CMM->>Linux: route, neighbour, and interface lookups
+    CMM->>FCI: program FPP route entries
+    FCI->>CDX: route add/update
+    CMM->>FCI: program original/reply conntrack
+    FCI->>CDX: CT register/update
+    CDX->>HW: install tuple, rewrite, route, queue metadata
+    Wire->>HW: later matching packets
+    HW->>HW: classify, NAT/rewrite, enqueue
+    HW->>CEETM: optional WAN egress shaping
+    CEETM->>Wire: transmit without steady-state Linux packet path
+    CT-->>CMM: DESTROY/timeout/end event
+    CMM->>FCI: remove CT and dereference routes
+    FCI->>CDX: delete hardware entries
+```
+
+The important boundary is that CMM does not become the policy engine. Linux
+creates and owns the policy result; CMM translates that result into NXP
+hardware objects when the flow is eligible.
+
+### Stream Decisions
+
+1. Linux accepts or rejects the traffic through normal OpenWrt ownership:
+   firewall, NAT, routing, PPPoE, VLAN, neighbour resolution, and conntrack.
+
+2. CMM decides whether the Linux-created stream is eligible for hardware
+   residency. Local traffic, unsupported interfaces, incomplete routes or
+   neighbours, unsupported features, missing direction state, and flows outside
+   the validated wired-routed scope remain fallback.
+
+3. CMM programs route entries before the conntrack entry. Route programming
+   gives the hardware a route ID, output device, input device, underlying input
+   device where needed, destination MAC, MTU, and VLAN metadata.
+
+4. CMM programs the stream as original and reply directions. Each direction can
+   be independently installed or disabled, and the runtime state must be
+   judged with route state and tuple-level hardware counters, not installed
+   state alone.
+
+5. CDX turns the FCI commands into resident hardware dataplane state. It stores
+   the CT pair, binds route IDs, marks disabled halves, and resolves route
+   metadata used by FMAN, DPAA, QMan, and BMan.
+
+6. Steady-state packets match hardware state directly. They are classified,
+   NATed or rewritten, queued, optionally shaped by CEETM on WAN egress, and
+   transmitted without the Linux packet path explaining the byte count.
+
+7. When Linux conntrack destroys or expires the stream, CMM removes the
+   hardware CT entry, decrements route and neighbour references, and removes
+   FPP route entries whose reference count reaches zero.
+
 ## Boxed Design
 
 “Boxed” in this fork means:
@@ -114,12 +195,37 @@ The UI model should report:
 It should not silently flip upstream software controls or hide software
 fallback behind a generic “hardware offload” switch.
 
+## Hardware QoS Boundary
+
+CEETM/QM work must stay inside the same boxed design.
+
+That means:
+
+- treat CEETM/QM as an NXP hardware-control feature, not as a generic Linux
+  qdisc or firewall extension
+- keep OpenWrt and Linux authoritative for routing, firewall, conntrack, and
+  software queueing policy
+- do not reuse upstream SQM/CAKE controls as the primary hardware-QoS UI
+- do not claim CAKE/FQ-CoDel-equivalent behavior without separate proof
+- do not silently fall back to software and still present the result as
+  hardware QoS
+
+The validated CEETM scope is narrow:
+
+- upload-side WAN egress shaping only
+- on the currently validated WAN path
+- with explicit proof that the CEETM-capable TX owner path is active
+
+Download-side latency control, WiFi QoS interaction, and product-level
+user-facing controls remain later work.
+
 ## Future Architecture Work
 
 Future architecture work still includes:
 
 - the Stage 4 NXP hardware-control boundary
 - extending the validated scope beyond the current 1G proof paths
+- production-ready hardware QoS controls and repeated validation
 - WiFi offload
 - IPsec offload
 - validated IPv6 offload
