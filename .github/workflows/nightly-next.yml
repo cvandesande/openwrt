@@ -24,22 +24,43 @@ concurrency:
 
 env:
   CACHE_EPOCH: ${{ inputs.cache_epoch || vars.MONO_NIGHTLY_CACHE_EPOCH || 'v1' }}
+  CANDIDATE_BUNDLE: nightly-next-candidates.bundle
+  CANDIDATE_ARTIFACT: nightly-next-candidates
 
 jobs:
-  nightly-next:
-    name: Rebase, build, and publish next branches
+  prepare-candidates:
+    name: Prepare candidate branches
     runs-on: ubuntu-24.04
-    timeout-minutes: 390
+    timeout-minutes: 30
     permissions:
       contents: write
-    env:
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    outputs:
+      main_sha: ${{ steps.prepare.outputs.main_sha }}
+      mono_oss_next_sha: ${{ steps.prepare.outputs.mono_oss_next_sha }}
+      mono_ask_next_sha: ${{ steps.prepare.outputs.mono_ask_next_sha }}
     steps:
       - name: Check out workflow branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: true
+
+      - name: Verify external actions are SHA pinned
+        run: |
+          set -euo pipefail
+          failures=0
+          while IFS= read -r ref; do
+            case "$ref" in
+              ./*|docker://*) continue ;;
+            esac
+
+            if ! printf '%s\n' "$ref" | grep -Eq '@[0-9a-f]{40}$'; then
+              printf '::error::External action is not pinned to a full commit SHA: %s\n' "$ref" >&2
+              failures=1
+            fi
+          done < <(grep -RhoE 'uses:[[:space:]]+[^[:space:]#]+' .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null | awk '{ print $2 }')
+
+          exit "$failures"
 
       - name: Configure Git identity
         run: |
@@ -50,12 +71,57 @@ jobs:
         id: prepare
         run: NIGHTLY_NEXT_MODE=prepare bash .github/workflows/scripts/update-nightly-tracking-branches.sh
 
+      - name: Bundle candidate refs
+        run: |
+          git bundle create "/tmp/${CANDIDATE_BUNDLE}" main mono-oss-next mono-ask-next
+          cd /tmp
+          sha256sum "${CANDIDATE_BUNDLE}" | tee "${CANDIDATE_BUNDLE}.sha256"
+
+      - name: Upload candidate bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.CANDIDATE_ARTIFACT }}
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            /tmp/${{ env.CANDIDATE_BUNDLE }}
+            /tmp/${{ env.CANDIDATE_BUNDLE }}.sha256
+
+  build-candidate:
+    name: Build mono-ask-next candidate
+    needs: prepare-candidates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/source/.ccache
+    steps:
+      - name: Download candidate bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.CANDIDATE_ARTIFACT }}
+          path: /tmp/nightly-next-candidate
+
+      - name: Check out mono-ask-next candidate from bundle
+        run: |
+          set -euo pipefail
+          cd /tmp/nightly-next-candidate
+          sha256sum -c "${CANDIDATE_BUNDLE}.sha256"
+          git clone "${CANDIDATE_BUNDLE}" "${GITHUB_WORKSPACE}/source"
+          cd "${GITHUB_WORKSPACE}/source"
+          git switch --force-create mono-ask-next origin/mono-ask-next
+          test "$(git rev-parse HEAD)" = "${{ needs.prepare-candidates.outputs.mono_ask_next_sha }}"
+
       - name: Free runner disk space
+        working-directory: ${{ github.workspace }}/source
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h
 
       - name: Install OpenWrt build dependencies
+        working-directory: ${{ github.workspace }}/source
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -85,19 +151,21 @@ jobs:
       - name: Restore dl cache
         id: restore-dl
         if: ${{ inputs.cold_build != true }}
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: dl
-          key: ${{ runner.os }}-${{ runner.arch }}-openwrt-dl-${{ env.CACHE_EPOCH }}-${{ hashFiles('feeds.conf.default', 'feeds.conf') }}
+          path: source/dl
+          key: ${{ runner.os }}-${{ runner.arch }}-openwrt-dl-${{ env.CACHE_EPOCH }}-${{ hashFiles('source/feeds.conf.default', 'source/feeds.conf') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-openwrt-dl-${{ env.CACHE_EPOCH }}-
 
       - name: Update feeds
+        working-directory: ${{ github.workspace }}/source
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       - name: Configure Mono Gateway DK build
+        working-directory: ${{ github.workspace }}/source
         run: |
           cp config/mono_gateway-dk.seed .config
           cat >> .config <<'EOF'
@@ -108,8 +176,13 @@ jobs:
           EOF
           make defconfig
 
+      - name: Check Mono vendor source hashes
+        working-directory: ${{ github.workspace }}/source
+        run: scripts/mono-check-vendor-hashes.sh
+
       - name: Compute cache keys
         id: cache-keys
+        working-directory: ${{ github.workspace }}/source
         env:
           CACHE_PREFIX: ${{ runner.os }}-${{ runner.arch }}-openwrt
         run: |
@@ -157,9 +230,9 @@ jobs:
       - name: Restore ccache
         id: restore-ccache
         if: ${{ inputs.cold_build != true }}
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: .ccache
+          path: source/.ccache
           key: ${{ steps.cache-keys.outputs.ccache_key }}
           restore-keys: |
             ${{ steps.cache-keys.outputs.ccache_restore_family }}
@@ -167,102 +240,101 @@ jobs:
       - name: Restore staging_dir/host cache
         id: restore-host
         if: ${{ inputs.cold_build != true }}
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: staging_dir/host
+          path: source/staging_dir/host
           key: ${{ steps.cache-keys.outputs.host_key }}
 
       - name: Restore staging_dir/hostpkg cache
         id: restore-hostpkg
         if: ${{ inputs.cold_build != true }}
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: staging_dir/hostpkg
+          path: source/staging_dir/hostpkg
           key: ${{ steps.cache-keys.outputs.hostpkg_key }}
 
       - name: Restore staging_dir/toolchain cache
         id: restore-toolchain
         if: ${{ inputs.cold_build != true }}
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: staging_dir/toolchain-*
+          path: source/staging_dir/toolchain-*
           key: ${{ steps.cache-keys.outputs.toolchain_key }}
 
       - name: Configure ccache limit
+        working-directory: ${{ github.workspace }}/source
         run: ccache --set-config=max_size=5G
 
       - name: Download sources
+        working-directory: ${{ github.workspace }}/source
         run: |
           set -o pipefail
           make download -j"$(nproc)" 2>&1 | tee make-download.log
 
       - name: Save dl cache
         if: ${{ inputs.cold_build != true && steps.restore-dl.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: dl
+          path: source/dl
           key: ${{ steps.restore-dl.outputs.cache-primary-key }}
 
       - name: Build firmware
         id: build
+        working-directory: ${{ github.workspace }}/source
         run: |
           set -o pipefail
           make -j"$(nproc)" 2>&1 | tee make.log
 
-      - name: Publish next branches
-        id: publish
-        run: NIGHTLY_NEXT_MODE=publish bash .github/workflows/scripts/update-nightly-tracking-branches.sh
-
       - name: Save ccache
         if: ${{ success() && inputs.cold_build != true && steps.restore-ccache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: .ccache
+          path: source/.ccache
           key: ${{ steps.cache-keys.outputs.ccache_save_key }}
 
       - name: Save staging_dir/host cache
         if: ${{ success() && inputs.cold_build != true && steps.restore-host.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: staging_dir/host
+          path: source/staging_dir/host
           key: ${{ steps.cache-keys.outputs.host_key }}
 
       - name: Save staging_dir/hostpkg cache
         if: ${{ success() && inputs.cold_build != true && steps.restore-hostpkg.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: staging_dir/hostpkg
+          path: source/staging_dir/hostpkg
           key: ${{ steps.cache-keys.outputs.hostpkg_key }}
 
       - name: Save staging_dir/toolchain cache
         if: ${{ success() && inputs.cold_build != true && steps.restore-toolchain.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: staging_dir/toolchain-*
+          path: source/staging_dir/toolchain-*
           key: ${{ steps.cache-keys.outputs.toolchain_key }}
 
       - name: Upload build logs
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mono-ask-next-build-logs
           if-no-files-found: warn
           retention-days: 14
           path: |
-            .config
-            make-download.log
-            make.log
-            logs/**
+            source/.config
+            source/make-download.log
+            source/make.log
+            source/logs/**
 
       - name: Upload firmware artifacts
         if: ${{ always() && steps.build.outcome == 'success' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mono-ask-next-firmware
           if-no-files-found: warn
           retention-days: 14
           path: |
-            bin/targets/layerscape/armv8_64b/**
+            source/bin/targets/layerscape/armv8_64b/**
 
       - name: Write build summary
         if: ${{ always() }}
@@ -272,11 +344,55 @@ jobs:
             echo
             echo "| Item | Value |"
             echo "| --- | --- |"
-            echo "| main | \`${{ steps.prepare.outputs.main_sha }}\` |"
-            echo "| mono-oss-next | \`${{ steps.prepare.outputs.mono_oss_next_sha }}\` |"
-            echo "| mono-ask-next | \`${{ steps.prepare.outputs.mono_ask_next_sha }}\` |"
+            echo "| main | \`${{ needs.prepare-candidates.outputs.main_sha }}\` |"
+            echo "| mono-oss-next candidate | \`${{ needs.prepare-candidates.outputs.mono_oss_next_sha }}\` |"
+            echo "| mono-ask-next candidate | \`${{ needs.prepare-candidates.outputs.mono_ask_next_sha }}\` |"
             echo "| build result | \`${{ steps.build.outcome }}\` |"
-            echo "| publish result | \`${{ steps.publish.outcome }}\` |"
             echo "| cache epoch | \`${CACHE_EPOCH}\` |"
             echo "| cold build | \`${{ inputs.cold_build == true }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-next:
+    name: Publish next branches
+    needs:
+      - prepare-candidates
+      - build-candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download candidate bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.CANDIDATE_ARTIFACT }}
+          path: /tmp/nightly-next-candidate
+
+      - name: Check out candidate refs from bundle
+        run: |
+          set -euo pipefail
+          cd /tmp/nightly-next-candidate
+          sha256sum -c "${CANDIDATE_BUNDLE}.sha256"
+          git clone "${CANDIDATE_BUNDLE}" "${GITHUB_WORKSPACE}/source"
+          cd "${GITHUB_WORKSPACE}/source"
+          git switch --force-create main origin/main
+          git switch --force-create mono-oss-next origin/mono-oss-next
+          git switch --force-create mono-ask-next origin/mono-ask-next
+          test "$(git rev-parse mono-oss-next)" = "${{ needs.prepare-candidates.outputs.mono_oss_next_sha }}"
+          test "$(git rev-parse mono-ask-next)" = "${{ needs.prepare-candidates.outputs.mono_ask_next_sha }}"
+
+      - name: Configure authenticated origin
+        working-directory: ${{ github.workspace }}/source
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Publish next branches
+        id: publish
+        working-directory: ${{ github.workspace }}/source
+        run: NIGHTLY_NEXT_MODE=publish bash .github/workflows/scripts/update-nightly-tracking-branches.sh
