@@ -35,8 +35,9 @@ The branch and build sequence is:
    `mono-oss` tip, then rebase it onto `main`.
 4. Rebuild the local `mono-ask-next` candidate from the current validated
    `mono-ask` tip, then rebase it onto the local `mono-oss-next` candidate.
-5. Build the local `mono-ask-next` candidate.
-6. Push `mono-oss-next` and `mono-ask-next` with `--force-with-lease` only
+5. Save the prepared candidate refs into a short-lived Git bundle artifact.
+6. Build the local `mono-ask-next` candidate in a separate read-only job.
+7. Push `mono-oss-next` and `mono-ask-next` with `--force-with-lease` only
    after the `mono-ask-next` build succeeds.
 
 The `--force-with-lease` push is intentional for the `*-next` branches because
@@ -62,8 +63,10 @@ fast-forward succeeded first.
 
 ## Build
 
-After local rebases succeed, the workflow stays on the unpushed
-`mono-ask-next` candidate and runs the normal OpenWrt build flow:
+After local rebases succeed, the workflow passes the unpushed candidate refs
+to the build job through a Git bundle artifact. The build job checks out the
+candidate `mono-ask-next` commit from that bundle and runs the normal OpenWrt
+build flow:
 
 ```sh
 ./scripts/feeds update -a
@@ -77,11 +80,50 @@ make -j"$(nproc)"
 The CI job appends OpenWrt build options for ccache and build logs before
 `make defconfig`; it does not change the checked-in seed config.
 
+Before the global source download and firmware build, the workflow runs
+`scripts/mono-check-vendor-hashes.sh`. This validates the Mono vendor git
+packages selected by the product image against their checked-in
+`PKG_MIRROR_HASH` values. The helper removes only those packages' matching
+source archives from `dl/` before checking, so a stale cached tarball cannot
+mask a `PKG_SOURCE_VERSION` update that forgot to refresh `PKG_MIRROR_HASH`.
+If this preflight fails, verify the pinned vendor commit and update the hash
+printed by OpenWrt rather than using `PKG_MIRROR_HASH:=skip`.
+
+The default checked package paths are `package/kernel/ask-cdx`,
+`package/kernel/ask-fci`, `package/libs/libfci`, `package/network/ask-cmm`,
+and `package/network/ask-dpa-app`.
+
 If that build succeeds, the workflow publishes both `*-next` branches. If the
 build fails, the `*-next` branches keep their previous remote values.
 
 Build logs, `.config`, and target output under
 `bin/targets/layerscape/armv8_64b/` are uploaded as workflow artifacts.
+
+## Security Model
+
+The workflow separates branch mutation from build execution:
+
+- `prepare-candidates` has `contents: write`; it fetches, rebases, pushes
+  `main`, and uploads a short-lived Git bundle containing the unpushed
+  candidate refs. It does not run the OpenWrt build.
+- `build-candidate` has only read-level permissions; it downloads the bundle
+  and runs `feeds`, `defconfig`, `make download`, and `make`. This keeps the
+  repository write token out of the job that executes OpenWrt package and build
+  logic.
+- `publish-next` has `contents: write`; it downloads the already-built bundle
+  and publishes `mono-oss-next` and `mono-ask-next`. It does not run the build.
+
+External GitHub Actions are pinned to full commit SHAs, with comments recording
+the corresponding release versions. This is intentional: recent CI/CD supply
+chain attacks, including TeamPCP's March 2026 Trivy and Checkmarx action tag
+poisoning campaign, showed that mutable action tags can be force-moved to
+malicious commits. The workflow includes a guard step that fails if a future
+external action reference is not pinned to a full SHA.
+
+As of the April 2026 security audit, the workflow pins current releases of the
+official GitHub Actions it uses: `actions/checkout` v6.0.2, `actions/cache`
+v5.0.5, `actions/upload-artifact` v7.0.1, and `actions/download-artifact`
+v8.0.1.
 
 ## Cache Strategy
 
@@ -124,8 +166,9 @@ save for that run.
 
 ## Token And Branch Protection Caveats
 
-The workflow uses `GITHUB_TOKEN` with `contents: write` because the same job
-pushes `main` before the build and publishes `*-next` after a successful build.
+The workflow uses `GITHUB_TOKEN` with `contents: write` only in jobs that push
+branches. The build job uses read-level permissions and should not be granted
+repository write access.
 
 This requires repository Actions workflow permissions to allow read/write
 tokens. If `main` is branch-protected against direct pushes by GitHub Actions,

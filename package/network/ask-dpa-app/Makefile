@@ -13,6 +13,8 @@ PKG_RELEASE:=2
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/we-are-mono/ASK.git
+# When PKG_SOURCE_VERSION changes, run this and update PKG_MIRROR_HASH:
+#   scripts/mono-check-vendor-hashes.sh package/network/ask-dpa-app
 PKG_SOURCE_VERSION:=beefead3fc638a79e16c237c99182628f8b96cc9
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
 PKG_MIRROR_HASH:=c4b183d5ff6ca4330147cc3438ca9daaf2fa780e33588c213ab5ecc330ac166c
