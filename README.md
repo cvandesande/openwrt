@@ -164,6 +164,7 @@ More detail lives in:
 - [docs/01-platform-and-lab-state.md](docs/01-platform-and-lab-state.md)
 - [docs/02-fast-path-architecture.md](docs/02-fast-path-architecture.md)
 - [docs/03-fman-backend-design.md](docs/03-fman-backend-design.md)
+- [docs/nightly-next-workflow.md](docs/nightly-next-workflow.md)
 
 Those docs cover:
 
@@ -173,3 +174,4 @@ Those docs cover:
 - stage status
 - observability and proof model
 - remaining work
+- nightly tracking-branch automation
