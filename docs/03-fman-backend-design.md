@@ -157,6 +157,122 @@ Stage 6 should focus on:
 - rebase hygiene
 - operator documentation and validation polish
 
+## CEETM Upload-Shaping Proof
+
+The first CEETM milestone is validated for upload-side WAN egress shaping on
+the current 1G routed WAN path.
+
+The implemented prerequisite is a narrow CEETM-capable TX owner path in the
+DPAA Ethernet driver. It is guarded behind
+`CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER` and uses the CDX CEETM FQ callback only
+after CDX has created the CEETM context and explicitly enabled egress QoS for
+the interface.
+
+Validated behavior on April 26, 2026:
+
+- `eth0` was assigned to CEETM channel 1
+- `set qm interface eth0 qos on` succeeded without breaking WAN
+- `query qm interface eth0` reported active CEETM egress state
+- the CEETM port shaper was set to `20000` kbps and queried back
+- a 64 MiB host-side upload through `pppoe-wan` measured about 18.37 Mbps
+- after restoring the port shaper to `100000` kbps, the same upload measured
+  about 45.5 Mbps
+- CEETM class queue 0 hardware counters increased during the tests
+- no `ASK CEETM TX owner` kernel errors were observed
+- PPPoE, FPP route entries, and CMM connection entries remained present after
+  CEETM activation
+
+The proof is intentionally limited. It is not a download-side latency or
+bufferbloat proof, not a CAKE/FQ-CoDel-equivalence claim, and not Stage 4
+user-facing integration.
+
+### Manual Egress QoS Enablement
+
+These commands enable the validated upload-side hardware egress shaper on the
+current WAN lower interface. They are manual runtime commands, not the final
+Stage 4 user-facing integration.
+
+Use the WAN lower interface, not the PPPoE interface or VLAN subinterface:
+
+```sh
+WAN_IF=eth0
+```
+
+Check the current state first:
+
+```sh
+cmm -c "query qm interface $WAN_IF"
+```
+
+If the query already starts with `Egress QOS info eth0::`, CEETM is already
+enabled for `eth0`; skip the channel assignment and `qos on` commands and only
+set or adjust the shaper.
+
+Enable CEETM egress QoS and set the port shaper when the query reports
+`Interface eth0 qos disabled`:
+
+```sh
+cmm -c "set qm channel 1 assign interface $WAN_IF"
+cmm -c "set qm interface $WAN_IF qos on"
+cmm -c "set qm interface $WAN_IF shaper on rate 95000 bucketsize 8192"
+cmm -c "query qm interface $WAN_IF"
+```
+
+On older images, re-running the channel assignment after CEETM is already
+enabled may print `FPP_CMD_QM_CHNL_ASSIGN` with error code `65534` and log
+`channel number 0 already assigned to iface eth0`. If the subsequent
+`query qm interface eth0` still shows `Egress QOS info eth0::`, that duplicate
+assignment error is harmless. Newer images treat same-interface channel
+assignment as idempotent while still rejecting assignment of the same channel
+to a different interface.
+
+For an ISP upload service capped at 100 Mbps, `95000` kbps is the recommended
+starting value. The hardware shaper should be slightly below the ISP cap so the
+router, not the upstream policer, is the upload bottleneck. If loaded upload
+latency still rises too much, reduce the value in small steps, for example to
+`90000` kbps. Do not treat this as download-side bufferbloat control.
+
+The expected query output should include an egress QoS section for `eth0` and a
+port shaper line similar to:
+
+```text
+Egress QOS info eth0::
+port shaper:: rate in kbps 95000, bucketsize 8192
+```
+
+Stop and disable the feature if WAN connectivity drops or the kernel logs new
+`ASK CEETM TX owner` errors:
+
+```sh
+cmm -c "set qm interface $WAN_IF shaper off"
+cmm -c "set qm interface $WAN_IF qos off"
+```
+
+### CEETM Scope Rules
+
+To keep the work boxed and technically honest:
+
+- treat this as upload-side WAN egress shaping first
+- do not claim download-side bufferbloat control from the initial CEETM work
+- do not present CEETM as a drop-in CAKE/SQM equivalent
+- do not route the feature through upstream firewall flow-offload or SQM
+  semantics
+- keep the control surface NXP-specific
+- stop if CEETM activation requires a broader dataplane redesign than the
+  current boxed architecture allows
+
+### What Counts As Success
+
+The first acceptable CEETM milestone is:
+
+- `query qm <wan-lower-iface>` no longer reports egress QoS disabled
+- a CEETM shaper can be set and queried back honestly
+- upload throughput can be capped below line rate using the hardware path
+- the proof remains bounded to upload-side shaping
+- Stage 3/5 offload behavior still works
+
+Anything weaker than that should be reported as incomplete.
+
 ## Observability Model
 
 True offload means Linux packet accounting is no longer enough to explain the
@@ -197,6 +313,10 @@ The currently proven scope is:
   - `eth2 -> eth0.10 -> pppoe-wan`
 - direct-routed production path:
   - `eth1.18 -> eth0.10 -> pppoe-wan`
+- upload-side CEETM hardware egress shaping:
+  - WAN lower interface `eth0`
+  - PPPoE WAN path through `eth0.10 -> pppoe-wan`
+  - default CEETM class queue 0
 - validated on the 1G topology
 
 ## Remaining Work
@@ -204,14 +324,13 @@ The currently proven scope is:
 The following remain future work:
 
 - Stage 6 soak and repeatability
-- reboot, reconnect, and reload validation
 - 10G physical proof on `eth3` and `eth4`
 - Stage 4 UI and service boundary
+- repeat CEETM validation across reboot, reconnect, and reload cycles
 - WiFi offload
 - IPsec offload
 - validated IPv6 offload
 - hardware QoS as a finished product feature
 
-Hardware shaping and CEETM/QM work may become relevant later, but they should
-be treated as NXP-specific hardware controls, not as a drop-in replacement for
-OpenWrt CAKE/SQM semantics.
+Hardware shaping and CEETM/QM work should be treated as NXP-specific hardware
+controls, not as a drop-in replacement for OpenWrt CAKE/SQM semantics.

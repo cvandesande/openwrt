@@ -59,6 +59,9 @@ static const char dpa_stats_percpu[][ETH_GSTRING_LEN] = {
 	"tx toenc",
 	"tx todec",
 #endif
+#ifdef CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER
+	"ask ceetm tx drops",
+#endif
 	"tx S/G",
 	"rx S/G",
 	"tx error",
@@ -400,6 +403,10 @@ static void copy_stats(struct dpa_percpu_priv_s *percpu_priv, int num_cpus,
 
 	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->tx_caam_dec;
 	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->tx_caam_dec;
+#endif
+#ifdef CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ask_ceetm_tx_drops;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ask_ceetm_tx_drops;
 #endif
 	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->tx_frag_skbuffs;
 	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->tx_frag_skbuffs;
