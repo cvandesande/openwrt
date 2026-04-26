@@ -86,6 +86,11 @@ packages selected by the product image against their checked-in
 `PKG_MIRROR_HASH` values. The helper removes only those packages' matching
 source archives from `dl/` before checking, so a stale cached tarball cannot
 mask a `PKG_SOURCE_VERSION` update that forgot to refresh `PKG_MIRROR_HASH`.
+For this preflight it disables OpenWrt source mirrors, regenerates the archive
+from the package's pinned `PKG_SOURCE_URL` and `PKG_SOURCE_VERSION`, and then
+compares the regenerated archive hash directly with `PKG_MIRROR_HASH`.
+Duplicate package recipes that share the exact same source archive, such as
+`ask-fci` and `libfci`, are checked once.
 If this preflight fails, verify the pinned vendor commit and update the hash
 printed by OpenWrt rather than using `PKG_MIRROR_HASH:=skip`.
 
