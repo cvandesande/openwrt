@@ -181,7 +181,7 @@ Those docs cover:
 - remaining work
 - local `clangd` and `compile_commands.json` developer workflow
   ([docs/04-developer-tooling.md](docs/04-developer-tooling.md))
-- nightly tracking-branch automation
+- nightly tracking-branch automation, smoke testing, and manual promotion
 
 SELinux support is included for the Mono Gateway DK image, with policy kept in
 the OpenWrt package layer and shaped by observed access rather than broad
