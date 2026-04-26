@@ -20,6 +20,13 @@ config FSL_DPAA_CEETM
 	help
 	Enable QoS offloading support through the CEETM hardware block.
 
+config FSL_DPAA_ASK_CEETM_TX_OWNER
+	bool "ASK CEETM TX owner hooks"
+	default n
+	help
+	  Enable the narrow ASK/CDX-owned CEETM TX path used by the Mono
+	  dataplane. This does not enable the Linux CEETM qdisc control plane.
+
 config FSL_DPAA_CEETM_CCS_THRESHOLD_1G
 	hex "CEETM egress congestion threshold on 1G ports"
 	depends on FSL_DPAA_CEETM
