@@ -15,5 +15,10 @@ start() {
 }
 
 stop() {
+	if [ "${CDX_UNSAFE_UNLOAD:-0}" != "1" ]; then
+		echo "Refusing to unload cdx: CEETM teardown is incomplete and normal unload can leak hardware resources. Set CDX_UNSAFE_UNLOAD=1 only for debug recovery."
+		return 1
+	fi
+
 	rmmod cdx
 }
