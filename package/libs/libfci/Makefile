@@ -9,15 +9,16 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=libfci
 PKG_VERSION:=9.00.12
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/cvandesande/fci.git
 # When PKG_SOURCE_VERSION changes, run this and update PKG_MIRROR_HASH:
 #   scripts/mono-check-vendor-hashes.sh package/kernel/ask-fci package/libs/libfci
-PKG_SOURCE_VERSION:=35e3a6df96ea14cf431243c76fcc1a3bf7335ff6
+PKG_SOURCE_VERSION:=5b8cfa8453969f0538fe90870f750e22aea80cbb
 PKG_SOURCE_SUBDIR:=fci-source-$(PKG_VERSION)
-PKG_MIRROR_HASH:=488af4d4f5087995534d448967dc9fa3da77a6c2020b5f0706b072bf44aa7238
+PKG_SOURCE:=$(PKG_SOURCE_SUBDIR).tar.zst
+PKG_MIRROR_HASH:=99b5692ec40ba14d8fda45996d25129070d13365520b8f86d464d9f5d518e85b
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
 PKG_LICENSE:=GPL-2.0-or-later
