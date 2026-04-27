@@ -1,11 +1,89 @@
 #!/bin/sh
 
-DISK=/dev/mmcblk0
-PART=${DISK}p1
+MONO_ROOT_START_SECTOR=65536
 
 if ! grep -q "mono,gateway-dk" /sys/firmware/devicetree/base/compatible 2>/dev/null; then
 	exit 0
 fi
+
+mono_cmdline_get_var() {
+	local key="$1"
+	local arg
+
+	for arg in $(cat /proc/cmdline); do
+		case "$arg" in
+		${key}=*)
+			echo "${arg#*=}"
+			return 0
+			;;
+		esac
+	done
+
+	return 1
+}
+
+mono_gateway_root_part() {
+	local root part disk partn start removable type
+
+	root="$(mono_cmdline_get_var root)" || {
+		logger -t resize_rootfs "Unable to determine root device"
+		return 1
+	}
+
+	case "$root" in
+	/dev/mmcblk*p1)
+		part="${root##*/}"
+		;;
+	*)
+		logger -t resize_rootfs "Refusing unsupported root device: $root"
+		return 1
+		;;
+	esac
+
+	disk="${part%p1}"
+	case "$disk" in
+	mmcblk|mmcblk*[!0-9]*)
+		logger -t resize_rootfs "Refusing non-eMMC root device: /dev/$part"
+		return 1
+		;;
+	esac
+
+	[ -b "/dev/$part" ] || {
+		logger -t resize_rootfs "Root partition /dev/$part is not a block device"
+		return 1
+	}
+
+	[ -d "/sys/block/$disk" ] || {
+		logger -t resize_rootfs "Root disk /dev/$disk is not present"
+		return 1
+	}
+
+	partn="$(cat "/sys/class/block/$part/partition" 2>/dev/null)"
+	[ "$partn" = "1" ] || {
+		logger -t resize_rootfs "Refusing non-root partition /dev/$part"
+		return 1
+	}
+
+	start="$(cat "/sys/class/block/$part/start" 2>/dev/null)"
+	[ "$start" = "$MONO_ROOT_START_SECTOR" ] || {
+		logger -t resize_rootfs "Refusing /dev/$part: start sector is $start, expected $MONO_ROOT_START_SECTOR"
+		return 1
+	}
+
+	removable="$(cat "/sys/block/$disk/removable" 2>/dev/null)"
+	[ "$removable" = "0" ] || {
+		logger -t resize_rootfs "Refusing removable root disk /dev/$disk"
+		return 1
+	}
+
+	type="$(cat "/sys/block/$disk/device/type" 2>/dev/null)"
+	[ "$type" = "MMC" ] || {
+		logger -t resize_rootfs "Refusing non-eMMC root disk /dev/$disk"
+		return 1
+	}
+
+	echo "/dev/$part"
+}
 
 command -v sfdisk >/dev/null || {
 	logger -t resize_rootfs "sfdisk not found, skipping resize"
@@ -16,6 +94,15 @@ command -v resize2fs >/dev/null || {
 	logger -t resize_rootfs "resize2fs not found, skipping resize"
 	exit 1
 }
+
+awk '$2 == "/" && $3 == "ext4" { found = 1 } END { exit !found }' /proc/mounts || {
+	logger -t resize_rootfs "Root filesystem is not ext4, skipping resize"
+	exit 1
+}
+
+PART="$(mono_gateway_root_part)" || exit 1
+PART_NAME="${PART##*/}"
+DISK="/dev/${PART_NAME%p1}"
 
 PART_END=$(sfdisk -l "$DISK" 2>/dev/null | awk -v part="$PART" '$1 == part { print $3 }')
 DISK_END=$(sfdisk -l "$DISK" 2>/dev/null | awk -v disk="$DISK:" '$1 == "Disk" && $2 == disk { gsub(/,/, "", $7); print $7 }')
