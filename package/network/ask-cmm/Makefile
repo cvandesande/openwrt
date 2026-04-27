@@ -17,6 +17,7 @@ PKG_SOURCE_URL:=https://github.com/cvandesande/ask-cmm.git
 #   scripts/mono-check-vendor-hashes.sh package/network/ask-cmm
 PKG_SOURCE_VERSION:=6698c2a14cde768163bdfc7f8463f9c3ec15b691
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
+PKG_SOURCE:=$(PKG_SOURCE_SUBDIR).tar.zst
 PKG_MIRROR_HASH:=19595b5ac5f31816c597628d65d3fb36fb248b5929f58efbae55a4c508bfb140
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
