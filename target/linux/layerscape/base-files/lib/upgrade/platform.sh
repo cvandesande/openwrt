@@ -8,6 +8,92 @@ RAMFS_COPY_DATA=""
 
 REQUIRE_IMAGE_METADATA=1
 
+MONO_ROOT_START_SECTOR=65536
+
+mono_cmdline_get_var() {
+	local key="$1"
+	local arg
+
+	for arg in $(cat /proc/cmdline); do
+		case "$arg" in
+		${key}=*)
+			echo "${arg#*=}"
+			return 0
+			;;
+		esac
+	done
+
+	return 1
+}
+
+mono_gateway_root_part() {
+	local root part disk partn start removable type
+
+	if ! grep -q "mono,gateway-dk" /sys/firmware/devicetree/base/compatible 2>/dev/null; then
+		echo "Not a Mono Gateway DK" >&2
+		return 1
+	fi
+
+	root="$(mono_cmdline_get_var root)" || {
+		echo "Unable to determine root device" >&2
+		return 1
+	}
+
+	case "$root" in
+	/dev/mmcblk*p1)
+		part="${root##*/}"
+		;;
+	*)
+		echo "Refusing to use unsupported root device: $root" >&2
+		return 1
+		;;
+	esac
+
+	disk="${part%p1}"
+	case "$disk" in
+	mmcblk|mmcblk*[!0-9]*)
+		echo "Refusing to use non-eMMC root device: /dev/$part" >&2
+		return 1
+		;;
+	esac
+
+	[ -b "/dev/$part" ] || {
+		echo "Root partition /dev/$part is not a block device" >&2
+		return 1
+	}
+
+	[ -d "/sys/block/$disk" ] || {
+		echo "Root disk /dev/$disk is not present" >&2
+		return 1
+	}
+
+	partn="$(cat "/sys/class/block/$part/partition" 2>/dev/null)"
+	[ "$partn" = "1" ] || {
+		echo "Refusing to use non-root partition /dev/$part" >&2
+		return 1
+	}
+
+	start="$(cat "/sys/class/block/$part/start" 2>/dev/null)"
+	[ "$start" = "$MONO_ROOT_START_SECTOR" ] || {
+		echo "Refusing to use /dev/$part: start sector is $start, expected $MONO_ROOT_START_SECTOR" >&2
+		return 1
+	}
+
+	removable="$(cat "/sys/block/$disk/removable" 2>/dev/null)"
+	[ "$removable" = "0" ] || {
+		echo "Refusing to use removable root disk /dev/$disk" >&2
+		return 1
+	}
+
+	type="$(cat "/sys/block/$disk/device/type" 2>/dev/null)"
+	[ "$type" = "MMC" ] || {
+		echo "Refusing to use non-eMMC root disk /dev/$disk" >&2
+		return 1
+	}
+
+	echo "/dev/$part"
+}
+
 platform_do_upgrade_sdboot() {
 	local diskdev partdev parttype=ext4
 	local tar_file="$1"
@@ -35,9 +121,15 @@ platform_do_upgrade_sdboot() {
 
 platform_do_upgrade_emmc() {
 	local image_file="$1"
+	local rootpart
 
-	echo "Writing image to /dev/mmcblk0p1..."
-	get_image "$image_file" | fwtool -i /dev/null -T - | dd of=/dev/mmcblk0p1 bs=512k conv=fsync
+	rootpart="$(mono_gateway_root_part)" || return 1
+
+	echo "Writing image to $rootpart..."
+	get_image "$image_file" | fwtool -i /dev/null -T - | dd of="$rootpart" bs=512k conv=fsync || {
+		echo "Image write to $rootpart failed"
+		return 1
+	}
 	echo "Upgrade complete"
 }
 
@@ -76,10 +168,26 @@ platform_copy_config_sdboot() {
 	fi
 }
 platform_copy_config_emmc() {
-	mount -t ext4 -o rw,noatime /dev/mmcblk0p1 /mnt 2>&1
+	local rootpart
+
+	rootpart="$(mono_gateway_root_part)" || return 1
+
+	mount -t ext4 -o rw,noatime "$rootpart" /mnt 2>&1 || {
+		echo "Failed to mount $rootpart for config backup"
+		return 1
+	}
+
 	echo "Saving config backup..."
-	cp -af "$UPGRADE_BACKUP" "/mnt/$BACKUP_FILE"
-	umount /mnt
+	cp -af "$UPGRADE_BACKUP" "/mnt/$BACKUP_FILE" || {
+		echo "Failed to copy config backup to $rootpart"
+		umount /mnt
+		return 1
+	}
+
+	umount /mnt || {
+		echo "Failed to unmount $rootpart after config backup"
+		return 1
+	}
 }
 
 platform_copy_config() {
@@ -180,7 +288,7 @@ platform_do_upgrade() {
 	mono,gateway-dk | \
 	mono,gateway-dk-sdboot)
 		platform_do_upgrade_emmc "$1"
-		return 0
+		return $?
 		;;
 	*)
 		echo "Sysupgrade is not currently supported on $board"

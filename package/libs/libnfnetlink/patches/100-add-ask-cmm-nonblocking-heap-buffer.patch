@@ -71,20 +71,32 @@ index 667e5ef..96ecbbb 100644
  	 * binding to pid '0' will default */
  
  	/* let us do the initial bind */
-@@ -279,6 +291,58 @@ void nfnl_unset_sequence_tracking(struct nfnl_handle *h)
+@@ -255,6 +267,8 @@ struct nfnl_handle *nfnl_open(void)
+ 
+ err_close:
++	if (nfnlh->rcv_buff)
++		free(nfnlh->rcv_buff);
+ 	close(nfnlh->fd);
+ err_free:
+ 	free(nfnlh);
+ 	return NULL;
+@@ -279,6 +291,60 @@ void nfnl_unset_sequence_tracking(struct nfnl_handle *h)
  void nfnl_set_rcv_buffer_size(struct nfnl_handle *h, unsigned int size)
  {
- 	h->rcv_buffer_size = size;
-+	/* free existing rcv_buff as there is a change in size */
-+	if (h->rcv_buff)
-+		free(h->rcv_buff);
-+	/* allocate a buffer which can be used to receive data */
-+	h->rcv_buff = (uint8_t *)calloc(h->rcv_buffer_size + NFNL_F_ALIGN_SIZE, 1);
-+	if (!h->rcv_buff) {
+-	h->rcv_buffer_size = size;
++	uint8_t *new_buff;
++
++	/* allocate replacement before dropping the active receive buffer */
++	new_buff = (uint8_t *)calloc(size + NFNL_F_ALIGN_SIZE, 1);
++	if (!new_buff) {
 +		fprintf(stderr, "%s :: calloc failed\n", __func__);
 +		return;
 +	}
++	if (h->rcv_buff)
++		free(h->rcv_buff);
++	h->rcv_buff = new_buff;
 +	h->rcv_buff_aligned = NFNL_F_ALIGN(h->rcv_buff, NFNL_F_ALIGN_SIZE);
++	h->rcv_buffer_size = size;
 +}
 +
 +/**
@@ -140,7 +152,7 @@ index 667e5ef..96ecbbb 100644
  	ret = close(nfnlh->fd);
  	if (ret < 0)
  		return ret;
-@@ -1549,11 +1616,18 @@ int nfnl_catch(struct nfnl_handle *h)
+@@ -1549,11 +1616,22 @@ int nfnl_catch(struct nfnl_handle *h)
  
  	assert(h);
  
@@ -148,11 +160,15 @@ index 667e5ef..96ecbbb 100644
 -		unsigned char buf[h->rcv_buffer_size]
 -			__attribute__ ((aligned));
 +	unsigned char *buf = h->rcv_buff_aligned;
-+	if (!buf) {
-+		h->rcv_buff = (unsigned char *)calloc(1, h->rcv_buffer_size);
-+		if (!h->rcv_buff) {
++	if (!h->rcv_buff || !buf) {
++		unsigned char *new_buff;
++
++		new_buff = (unsigned char *)calloc(1, h->rcv_buffer_size + NFNL_F_ALIGN_SIZE);
++		if (!new_buff)
 +			return -1;
-+		}
++		if (h->rcv_buff)
++			free(h->rcv_buff);
++		h->rcv_buff = new_buff;
 +		h->rcv_buff_aligned = NFNL_F_ALIGN(h->rcv_buff, NFNL_F_ALIGN_SIZE);
 +		buf = h->rcv_buff_aligned;
 +	}
