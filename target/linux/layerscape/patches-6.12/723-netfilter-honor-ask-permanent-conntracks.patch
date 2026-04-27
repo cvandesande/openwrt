@@ -86,7 +86,7 @@
 +		return -ENOENT;
 +
 +	if (status & IPS_PERMANENT) {
-+		ct->status |= IPS_PERMANENT;
++		set_bit(IPS_PERMANENT_BIT, &ct->status);
 +		return 0;
 +	}
 +
