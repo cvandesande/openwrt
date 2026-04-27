@@ -18,6 +18,7 @@ PKG_SOURCE_URL:=https://github.com/cvandesande/ask-cdx.git
 #   scripts/mono-check-vendor-hashes.sh package/kernel/ask-cdx
 PKG_SOURCE_VERSION:=6d1a3cd6bd263af5a0b97b48ea35019e8af71522
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
+PKG_SOURCE:=$(PKG_SOURCE_SUBDIR).tar.zst
 PKG_MIRROR_HASH:=95626ccd8bb6318372f68dec723e4c794fd0cc13b27a4ca987de053e73a44669
 PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
