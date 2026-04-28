@@ -57,3 +57,19 @@ software queueing policy.
 For the detailed architecture and proof model, see
 [02-fast-path-architecture.md](02-fast-path-architecture.md) and
 [03-fman-backend-design.md](03-fman-backend-design.md).
+
+## MAYA-W2 Wi-Fi Status
+
+First-pass u-blox M2-MAYA-W271 / MAYA-W2 Wi-Fi support is package-build
+supported only. The validation packages are `nxp-maya-w2-firmware`,
+`kmod-nxp-mxm-wifi`, and `maya-w2-wifi-diag`; they are included in
+`config/mono_gateway-dk.seed` for lab images and should be removed from
+production images that do not need first-card bring-up coverage.
+
+No MAYA-W2 card has been available for runtime validation, so this status does
+not claim probe, firmware download, radio creation, association, AP mode, or
+throughput success. Bluetooth and 802.15.4 / Thread / Zigbee support remain
+future work.
+
+See [04-maya-w2-wifi-build-support.md](04-maya-w2-wifi-build-support.md) for
+the package selection and first hardware-validation commands.

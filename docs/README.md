@@ -22,4 +22,8 @@ Read in this order:
    The detailed porting design, delivered stages, observability model, and
    next work.
 
+4. [04-maya-w2-wifi-build-support.md](04-maya-w2-wifi-build-support.md)
+   Optional MAYA-W2 Wi-Fi package build support and first hardware validation
+   commands.
+
 These docs intentionally describe the current supported design only.

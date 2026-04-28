@@ -1,0 +1,94 @@
+#!/bin/sh
+
+set +e
+
+section() {
+	printf '\n### %s\n' "$1"
+}
+
+run() {
+	printf '$ %s\n' "$*"
+	"$@" 2>&1
+}
+
+section "Kernel Messages"
+if command -v dmesg >/dev/null 2>&1; then
+	dmesg 2>&1 | grep -Ei 'moal|mlan|firmware|mmc|sdio|nxp|mwifiex|wlan_sdio'
+else
+	printf 'dmesg not found\n'
+fi
+
+section "SDIO Devices"
+if [ -d /sys/bus/sdio/devices ]; then
+	run ls -la /sys/bus/sdio/devices
+	for dev in /sys/bus/sdio/devices/*; do
+		[ -e "$dev" ] || continue
+		printf '\n%s\n' "$dev"
+		for attr in vendor device class modalias; do
+			[ -r "$dev/$attr" ] && printf '%s=%s\n' "$attr" "$(cat "$dev/$attr")"
+		done
+	done
+else
+	printf '/sys/bus/sdio/devices not found\n'
+fi
+
+section "MMC Hosts"
+if [ -d /sys/class/mmc_host ]; then
+	run ls -la /sys/class/mmc_host
+	for host in /sys/class/mmc_host/mmc*; do
+		[ -e "$host" ] || continue
+		printf '\n%s\n' "$host"
+		[ -r "$host/uevent" ] && cat "$host/uevent" 2>&1
+		run find "$host" -maxdepth 2 -type l -o -type d
+	done
+else
+	printf '/sys/class/mmc_host not found\n'
+fi
+
+section "GPIO And MMC Debugfs"
+if [ -r /sys/kernel/debug/gpio ]; then
+	run cat /sys/kernel/debug/gpio
+else
+	printf '/sys/kernel/debug/gpio not readable; mount debugfs to capture GPIO hog states\n'
+fi
+
+for dbg in /sys/kernel/debug/mmc*/ios; do
+	[ -r "$dbg" ] || continue
+	printf '\n%s\n' "$dbg"
+	cat "$dbg" 2>&1
+done
+
+section "Modules"
+run lsmod
+
+section "Wireless Devices"
+if command -v iw >/dev/null 2>&1; then
+	run iw dev
+	run iw phy
+else
+	printf 'iw not found\n'
+fi
+
+section "NXP Driver Proc Info"
+found=0
+if [ -r /proc/mwlan/wifi_status ]; then
+	printf '\n/proc/mwlan/wifi_status\n'
+	cat /proc/mwlan/wifi_status 2>&1
+	found=1
+fi
+for info in /proc/mwlan/*/*/info /proc/net/mwlan/*/*/info; do
+	[ -r "$info" ] || continue
+	found=1
+	printf '\n%s\n' "$info"
+	cat "$info" 2>&1
+done
+[ "$found" -eq 1 ] || printf 'No /proc/mwlan info files found\n'
+
+section "Installed Package Versions"
+if command -v apk >/dev/null 2>&1; then
+	apk info -v 2>/dev/null | grep -E 'nxp-maya-w2-firmware|kmod-nxp-mxm-wifi|maya-w2-wifi-diag|iw|wireless-regdb'
+elif command -v opkg >/dev/null 2>&1; then
+	opkg list-installed 2>/dev/null | grep -E 'nxp-maya-w2-firmware|kmod-nxp-mxm-wifi|maya-w2-wifi-diag|iw|wireless-regdb'
+else
+	printf 'No apk or opkg package manager found\n'
+fi

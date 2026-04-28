@@ -1,0 +1,66 @@
+From: Mono Technologies Inc. <support@mono.co>
+Date: Tue, 28 Apr 2026 00:00:00 +0000
+Subject: [PATCH] moal: allow OpenWrt backported cfg80211 callback signatures
+
+OpenWrt builds this external driver against the mac80211/cfg80211 backport
+headers, not the in-kernel cfg80211 headers. On this 6.12 target those
+backport headers expose cfg80211_ops callback signatures that NXP's driver
+only enables for later upstream kernel versions.
+
+Keep the existing upstream version checks and add an explicit package-provided
+guard so the OpenWrt build can select the callback shapes used by its
+backported cfg80211 headers without pretending that the base kernel is newer.
+---
+ mlinux/moal_cfg80211.c     |  6 +++---
+ mlinux/moal_cfg80211.h     |  6 +++---
+ mlinux/moal_sta_cfg80211.c | 16 ++++++++--------
+ 3 files changed, 14 insertions(+), 14 deletions(-)
+
+--- a/mlinux/moal_cfg80211.c
++++ b/mlinux/moal_cfg80211.c
+@@ -1692,1 +1692,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+@@ -2683,1 +2683,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+@@ -2754,1 +2754,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+--- a/mlinux/moal_cfg80211.h
++++ b/mlinux/moal_cfg80211.h
+@@ -150,1 +150,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+@@ -200,1 +200,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+@@ -205,1 +205,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+--- a/mlinux/moal_sta_cfg80211.c
++++ b/mlinux/moal_sta_cfg80211.c
+@@ -130,1 +130,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+@@ -204,1 +204,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+@@ -207,1 +207,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
+@@ -216,1 +216,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+@@ -702,1 +702,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+@@ -7281,1 +7281,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+@@ -7284,1 +7284,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
+@@ -7335,1 +7335,1 @@
+-#if CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++#if defined(NXP_MXM_OPENWRT_NEW_CFG80211_OPS) || CFG80211_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
