@@ -169,6 +169,7 @@ More detail lives in:
 - [docs/01-platform-and-lab-state.md](docs/01-platform-and-lab-state.md)
 - [docs/02-fast-path-architecture.md](docs/02-fast-path-architecture.md)
 - [docs/03-fman-backend-design.md](docs/03-fman-backend-design.md)
+- [docs/04-developer-tooling.md](docs/04-developer-tooling.md)
 - [docs/nightly-next-workflow.md](docs/nightly-next-workflow.md)
 
 Those docs cover:
@@ -179,4 +180,5 @@ Those docs cover:
 - stage status
 - observability and proof model
 - remaining work
+- local `clangd` and `compile_commands.json` developer workflow
 - nightly tracking-branch automation, smoke testing, and manual promotion
