@@ -22,4 +22,10 @@ Read in this order:
    The detailed porting design, delivered stages, observability model, and
    next work.
 
+Optional developer tooling:
+
+- [04-developer-tooling.md](04-developer-tooling.md)
+  Local `clangd` and `compile_commands.json` workflow for navigating the
+  kernel and ASK package C code.
+
 These docs intentionally describe the current supported design only.
