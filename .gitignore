@@ -14,6 +14,7 @@
 /feeds
 /feeds.conf
 /files
+/compile_commands*.json
 /target/linux/feeds
 /overlay
 /package/feeds
