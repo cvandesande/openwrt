@@ -91,6 +91,8 @@ For a list of supported devices see the [OpenWrt Hardware Database](https://open
 * [User Guide](https://openwrt.org/docs/guide-user/start)
 * [Developer Documentation](https://openwrt.org/docs/guide-developer/start)
 * [Technical Reference](https://openwrt.org/docs/techref/start)
+* [docs/04-developer-tooling.md](docs/04-developer-tooling.md): local `clangd`
+  and `compile_commands.json` developer workflow.
 
 ### Support Community
 
