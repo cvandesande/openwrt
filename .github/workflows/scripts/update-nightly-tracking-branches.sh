@@ -10,6 +10,7 @@ MONO_OSS_BRANCH="${MONO_OSS_BRANCH:-mono-oss}"
 MONO_ASK_BRANCH="${MONO_ASK_BRANCH:-mono-ask}"
 MONO_OSS_NEXT_BRANCH="${MONO_OSS_NEXT_BRANCH:-mono-oss-next}"
 MONO_ASK_NEXT_BRANCH="${MONO_ASK_NEXT_BRANCH:-mono-ask-next}"
+UPSTREAM_EXCLUDE_PATHS="${UPSTREAM_EXCLUDE_PATHS:-.github/workflows .github/llm-review-rules.md}"
 MODE="${1:-${NIGHTLY_NEXT_MODE:-prepare}}"
 
 summary() {
@@ -77,6 +78,27 @@ run_rebase() {
 	fi
 }
 
+restore_paths_from_ref() {
+	local ref="$1"
+	local path
+
+	for path in $UPSTREAM_EXCLUDE_PATHS; do
+		git rm -r --quiet --ignore-unmatch -- "$path"
+
+		if git cat-file -e "${ref}:${path}" 2>/dev/null; then
+			git restore --source "$ref" --staged --worktree -- "$path"
+		fi
+	done
+}
+
+commit_if_needed() {
+	local message="$1"
+
+	if ! git diff --quiet || ! git diff --cached --quiet; then
+		git commit -m "$message"
+	fi
+}
+
 force_with_lease_arg() {
 	local branch="$1"
 
@@ -112,14 +134,15 @@ prepare() {
 		exit 1
 	fi
 
-	git switch --force-create "$MAIN_BRANCH" "$(remote_ref "$MAIN_BRANCH")"
-	if ! git merge --ff-only "$upstream_main_ref"; then
-		printf '::error::%s/%s cannot be fast-forwarded to %s/%s\n' \
-			"$ORIGIN_REMOTE" "$MAIN_BRANCH" "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH" >&2
-		exit 1
+	exclude_ref="$(remote_ref "$MAIN_BRANCH")"
+	if remote_branch_exists "$MONO_OSS_NEXT_BRANCH"; then
+		exclude_ref="$(remote_ref "$MONO_OSS_NEXT_BRANCH")"
 	fi
+
+	git switch --force-create "$MAIN_BRANCH" "$upstream_main_ref"
+	restore_paths_from_ref "$exclude_ref"
+	commit_if_needed "${MAIN_BRANCH}: track upstream source without imported workflows"
 	main_sha="$(git rev-parse HEAD)"
-	git push "$ORIGIN_REMOTE" "${main_sha}:refs/heads/${MAIN_BRANCH}"
 	set_output main_sha "$main_sha"
 
 	git switch --force-create "$MONO_OSS_NEXT_BRANCH" "$(remote_ref "$MONO_OSS_BRANCH")"
@@ -137,7 +160,7 @@ prepare() {
 	summary ""
 	summary "| Branch | Local result SHA | Update policy |"
 	summary "| --- | --- | --- |"
-	summary "| \`${MAIN_BRANCH}\` | \`${main_sha}\` | Fast-forwarded from \`${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}\` and pushed directly |"
+	summary "| \`${MAIN_BRANCH}\` | \`${main_sha}\` | Constructed from \`${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}\` for this run only; excluded upstream paths restored from \`${exclude_ref}\`; not pushed |"
 	summary "| \`${MONO_OSS_NEXT_BRANCH}\` | \`${mono_oss_next_sha}\` | Rebuilt from \`${MONO_OSS_BRANCH}\`, then rebased onto \`${MAIN_BRANCH}\`; not pushed yet |"
 	summary "| \`${MONO_ASK_NEXT_BRANCH}\` | \`${mono_ask_next_sha}\` | Rebuilt from \`${MONO_ASK_BRANCH}\`, then rebased onto \`${MONO_OSS_NEXT_BRANCH}\`; not pushed yet |"
 	summary ""
@@ -187,7 +210,7 @@ publish() {
 	summary "| \`${MONO_OSS_NEXT_BRANCH}\` | \`${mono_oss_next_sha}\` | Published with force-with-lease after successful \`${MONO_ASK_NEXT_BRANCH}\` build |"
 	summary "| \`${MONO_ASK_NEXT_BRANCH}\` | \`${mono_ask_next_sha}\` | Published with force-with-lease after successful build |"
 	summary ""
-	summary "\`${MAIN_BRANCH}\` was already pushed at \`${main_sha}\` before the build."
+	summary "\`${MAIN_BRANCH}\` was a local upstream-source base for this run and was not pushed by Actions."
 }
 
 case "$MODE" in
