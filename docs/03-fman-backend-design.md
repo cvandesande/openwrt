@@ -5,7 +5,7 @@
 This file describes the current porting design for the Mono OpenWrt fork:
 
 - what the project is trying to achieve
-- how the boxed NXP ASK/FMAM/DPAA architecture is integrated
+- how the NXP ASK/FMAM/DPAA architecture is integrated
 - what stages are complete
 - what still remains before the work is considered finished
 
@@ -147,7 +147,7 @@ What Stage 5 proved:
 
 ### Stage 6: Soak, Rebase, And Cleanup
 
-This is the next active milestone.
+This is the current active milestone.
 
 Stage 6 should focus on:
 
@@ -162,7 +162,7 @@ Stage 6 should focus on:
 The first CEETM milestone is validated for upload-side WAN egress shaping on
 the current 1G routed WAN path.
 
-The implemented prerequisite is a narrow CEETM-capable TX owner path in the
+The implemented prerequisite is a CEETM-capable TX owner path in the
 DPAA Ethernet driver. It is guarded behind
 `CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER` and uses the CDX CEETM FQ callback only
 after CDX has created the CEETM context and explicitly enabled egress QoS for
@@ -250,7 +250,7 @@ cmm -c "set qm interface $WAN_IF qos off"
 
 ### CEETM Scope Rules
 
-To keep the work boxed and technically honest:
+To keep the work limited and technically honest:
 
 - treat this as upload-side WAN egress shaping first
 - do not claim download-side bufferbloat control from the initial CEETM work
@@ -259,7 +259,7 @@ To keep the work boxed and technically honest:
   semantics
 - keep the control surface NXP-specific
 - stop if CEETM activation requires a broader dataplane redesign than the
-  current boxed architecture allows
+  current boundary model allows
 
 ### What Counts As Success
 
@@ -268,7 +268,7 @@ The first acceptable CEETM milestone is:
 - `query qm <wan-lower-iface>` no longer reports egress QoS disabled
 - a CEETM shaper can be set and queried back honestly
 - upload throughput can be capped below line rate using the hardware path
-- the proof remains bounded to upload-side shaping
+- the proof remains limited to upload-side shaping
 - Stage 3/5 offload behavior still works
 
 Anything weaker than that should be reported as incomplete.
@@ -317,6 +317,13 @@ The currently proven scope is:
   - WAN lower interface `eth0`
   - PPPoE WAN path through `eth0.10 -> pppoe-wan`
   - default CEETM class queue 0
+- IPv4 tunnel-mode IPsec SEC offload:
+  - current lab tunnel between the local and remote protected subnets
+  - CMM SA programming and SA handles on inner tunnel flows
+  - DPAA/SEC and CMM IPsec counters advancing during ICMP, SSH, and bulk TCP
+    smoke tests
+  - bulk TCP reaching the available uplink range in the current lab after the
+    packet-size and DPAA TX buffer-ownership fixes
 - validated on the 1G topology
 
 ## Remaining Work
@@ -328,7 +335,8 @@ The following remain future work:
 - Stage 4 UI and service boundary
 - repeat CEETM validation across reboot, reconnect, and reload cycles
 - WiFi offload
-- IPsec offload
+- any additional vendor CPE/FPP IPsec behavior beyond the current SEC-offload
+  mode
 - validated IPv6 offload
 - hardware QoS as a finished product feature
 
