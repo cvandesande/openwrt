@@ -20,17 +20,17 @@ manually promoted onto `mono-ask`.
 
 The workflow is allowed to update only these branches:
 
-- `main`
 - `mono-oss-next`
 - `mono-ask-next`
 
-It does not update `mono-oss` or `mono-ask`, does not create nightly tags, and
-does not promote nightly results into validated branches.
+It does not update `main`, `mono-oss`, or `mono-ask`, does not create nightly
+tags, and does not promote nightly results into validated branches.
 
 The branch and build sequence is:
 
 1. Fetch `upstream/main` from `https://github.com/openwrt/openwrt.git`.
-2. Fast-forward `main` from `upstream/main` and push `main` to `origin`.
+2. Build a local `main` candidate from `upstream/main`, then restore excluded
+   upstream paths such as `.github/workflows` from `origin/main`.
 3. Rebuild the local `mono-oss-next` candidate from the current validated
    `mono-oss` tip, then rebase it onto `main`.
 4. Rebuild the local `mono-ask-next` candidate from the current validated
@@ -42,7 +42,7 @@ The branch and build sequence is:
 
 The workflow's `--force-with-lease` push is intentional for the `*-next`
 branches because rebasing rewrites those tracking branches. The workflow does
-not use it for `main`, `mono-oss`, or `mono-ask`. Manual promotion of a
+not push `main`, `mono-oss`, or `mono-ask`. Manual promotion of a
 validated result also uses `--force-with-lease`, but only after human smoke
 testing.
 
@@ -298,9 +298,9 @@ tags; create a new tag for a new validation point.
 
 The workflow separates branch mutation from build execution:
 
-- `prepare-candidates` has `contents: write`; it fetches, rebases, pushes
-  `main`, and uploads a short-lived Git bundle containing the unpushed
-  candidate refs. It does not run the OpenWrt build.
+- `prepare-candidates` has `contents: write`; it fetches, rebases, and uploads
+  a short-lived Git bundle containing the unpushed candidate refs. It does not
+  run the OpenWrt build.
 - `build-candidate` has only read-level permissions; it downloads the bundle
   and runs `feeds`, `defconfig`, `make download`, and `make`. This keeps the
   repository write token out of the job that executes OpenWrt package and build
