@@ -706,6 +706,12 @@ static const struct net_device_ops dpa_private_ops = {
 	.ndo_fix_features = dpa_fix_features,
 };
 
+bool dpa_is_private_netdev(const struct net_device *net_dev)
+{
+	return net_dev && net_dev->netdev_ops == &dpa_private_ops;
+}
+EXPORT_SYMBOL(dpa_is_private_netdev);
+
 static int dpa_private_napi_add(struct net_device *net_dev)
 {
 	struct dpa_priv_s *priv = netdev_priv(net_dev);
