@@ -55,9 +55,32 @@ static const char dpa_stats_percpu[][ETH_GSTRING_LEN] = {
 	"tx packets",
 	"tx recycled",
 	"tx confirm",
-#if defined(CONFIG_INET_IPSEC_OFFLOAD) && defined(CONFIG_CPE_FAST_PATH)
+#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
 	"tx toenc",
 	"tx todec",
+	"ipsec tx entry",
+	"ipsec tx direct",
+	"ipsec out ok",
+	"ipsec out no hook",
+	"ipsec out no sa",
+	"ipsec out fq miss",
+	"ipsec out fd fail",
+	"ipsec out enqueue fail",
+	"ipsec out l2 strip",
+	"ipsec out gso",
+	"ipsec out nonlinear",
+	"ipsec out fraglist",
+	"ipsec out sg entries",
+	"ipsec out compound",
+	"ipsec out enqueue busy",
+	"ipsec out enqueue busy high",
+	"ipsec in ok",
+	"ipsec in no fq",
+	"ipsec in fd fail",
+	"ipsec in enqueue fail",
+	"ipsec txconf null",
+	"ipsec txconf bpid35",
+	"ipsec txconf marker release",
 #endif
 #ifdef CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER
 	"ask ceetm tx drops",
@@ -397,12 +420,81 @@ static void copy_stats(struct dpa_percpu_priv_s *percpu_priv, int num_cpus,
 	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->tx_confirm;
 	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->tx_confirm;
 
-#if defined(CONFIG_INET_IPSEC_OFFLOAD) && defined(CONFIG_CPE_FAST_PATH)
+#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
 	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->tx_caam_enc;
 	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->tx_caam_enc;
 
 	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->tx_caam_dec;
 	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->tx_caam_dec;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_tx_entry;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_tx_entry;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_tx_direct;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_tx_direct;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_ok;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_ok;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_no_hook;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_no_hook;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_no_sa;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_no_sa;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_fq_miss;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_fq_miss;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_fd_fail;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_fd_fail;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_enqueue_fail;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_enqueue_fail;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_l2_strip;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_l2_strip;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_gso;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_gso;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_nonlinear;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_nonlinear;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_fraglist;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_fraglist;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_sg_entries;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_sg_entries;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_compound;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_compound;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_enqueue_busy;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_enqueue_busy;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_out_enqueue_busy_high;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_out_enqueue_busy_high;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_in_ok;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_in_ok;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_in_no_fq;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_in_no_fq;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_in_fd_fail;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_in_fd_fail;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_in_enqueue_fail;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_in_enqueue_fail;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_txconf_null;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_txconf_null;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_txconf_bpid35;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_txconf_bpid35;
+
+	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ipsec_txconf_marker_release;
+	data[crr_stat++ * num_stat_values + num_cpus] += percpu_priv->ipsec_txconf_marker_release;
 #endif
 #ifdef CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER
 	data[crr_stat * num_stat_values + crr_cpu] = percpu_priv->ask_ceetm_tx_drops;

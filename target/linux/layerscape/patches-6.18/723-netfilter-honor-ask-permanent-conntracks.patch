@@ -1,3 +1,18 @@
+From: Mono OpenWrt Integration <integration@mono.local>
+Date: Thu, 30 Apr 2026 12:15:00 +0100
+Subject: [PATCH] netfilter: honor ASK permanent conntrack pinning
+
+CMM needs a narrow way to pin an already-installed conntrack while hardware
+state depends on it, then unpin that conntrack when the control plane tears
+the hardware state down. Reuse the existing conntrack status bit and handle
+only the by-id pin/unpin update path instead of importing broader vendor
+conntrack behavior.
+
+Permanent entries retain a bounded visible timeout for userspace display and
+remain non-expired while established. The procfs dump also prints
+[PERMANENT] so pinned state is auditable during runtime validation.
+
+---
 --- a/include/net/netfilter/nf_conntrack.h
 +++ b/include/net/netfilter/nf_conntrack.h
 @@ -24,6 +24,8 @@
