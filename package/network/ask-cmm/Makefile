@@ -9,16 +9,16 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ask-cmm
 PKG_VERSION:=17.03.1
-PKG_RELEASE:=5
+PKG_RELEASE:=21
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/cvandesande/ask-cmm.git
 # When PKG_SOURCE_VERSION changes, run this and update PKG_MIRROR_HASH:
 #   scripts/mono-check-vendor-hashes.sh package/network/ask-cmm
-PKG_SOURCE_VERSION:=6698c2a14cde768163bdfc7f8463f9c3ec15b691
+PKG_SOURCE_VERSION:=0285259c01660d62288ff5b08e7fdf97abc1fd51
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
 PKG_SOURCE:=$(PKG_SOURCE_SUBDIR).tar.zst
-PKG_MIRROR_HASH:=19595b5ac5f31816c597628d65d3fb36fb248b5929f58efbae55a4c508bfb140
+PKG_MIRROR_HASH:=fff64224d33ec4c741da697c03468503082b44896df6cd0ec272007f63ef294d
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
 PKG_LICENSE:=GPL-2.0-or-later
@@ -46,15 +46,13 @@ define Package/ask-cmm/description
   Solutions Kit (ASK).
 endef
 
-# Build only the wired-first Stage 2 surface. WiFi, auto-bridge, the KEY/IPsec
-# FCI channel, QoS connmark, and the vendor XFRM-handle conntrack ABI stay
-# deferred until their milestone.
+# Build only the wired-first Stage 2 surface. WiFi, auto-bridge, and QoS
+# connmark stay deferred; this milestone enables IPsec with the no-flow-cache
+# conntrack XFRM-handle ABI.
 TARGET_CFLAGS += \
 	-Wno-error \
-	-DASK_STAGE2_SKIP_XFRM_CONNTRACK_ABI \
 	-DLS1043 \
 	-DFLOW_STATS \
-	-DIPSEC_SUPPORT_DISABLED \
 	-DIPSEC_NO_FLOW_CACHE \
 	-DSEC_PROFILE_SUPPORT \
 	-DENABLE_EGRESS_QOS \
