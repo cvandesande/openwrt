@@ -44,6 +44,7 @@
 #include <linux/skbuff.h>
 #include <linux/highmem.h>
 #include <linux/fsl_bman.h>
+#include <linux/moduleparam.h>
 #include <net/sock.h>
 
 #include "dpaa_eth.h"
@@ -61,8 +62,17 @@
 #include <uapi/linux/if_ether.h>
 #include <uapi/linux/ppp_defs.h>
 #include <uapi/linux/if_pppox.h>
+#include <linux/if_vlan.h>
 #include <net/xfrm.h>
 #include <net/dst.h>
+#endif
+
+#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
+static int dpaa_ipsec_compat_tx_queue;
+module_param_named(ipsec_compat_tx_queue, dpaa_ipsec_compat_tx_queue,
+		   int, 0644);
+MODULE_PARM_DESC(ipsec_compat_tx_queue,
+		 "DPAA TX queue for IPsec compat post-SEC frames (-1=CPU queue)");
 #endif
 
 #define DPAA_EXTRA_BUF_SIZE_4_SKB SMP_CACHE_BYTES + DPA_MAX_FD_OFFSET + \
@@ -75,6 +85,8 @@ static dpaa_eth_bpool_replenish_hook_t dpaa_eth_bpool_replenish_hook;
 
 /* registered function to get ceetm Fqs */
 #if defined(CONFIG_CPE_FAST_PATH) || defined(CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER)
+#define ASK_CEETM_DEFAULT_CLASS_QUEUE	0
+
 static cdx_get_ceetm_egressfq ceetm_fqget_func;
 static cdx_get_ceetm_dscp_fq ceetm_dscp_fqget_func;
 /* This function registers two cdx functions, which are to get the egress fq. 
@@ -387,16 +399,34 @@ struct sk_buff *_dpa_cleanup_tx_fd(const struct dpa_priv_s *priv,
 	const enum dma_data_direction dma_dir = DMA_TO_DEVICE;
 	int nr_frags;
 	int sg_len;
+#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
+	struct dpa_percpu_priv_s *ipsec_percpu_priv =
+		raw_cpu_ptr(priv->percpu_priv);
+#endif
 
 	/* retrieve skb back pointer */
 	DPA_READ_SKB_PTR(skb, skbh, phys_to_virt(addr), 0);
 
-	/* IPsec compat-path frames have no associated skb — the buffer
-	 * was allocated by CAAM, not the ethernet driver.  The compat
-	 * handler writes NULL here before enqueue.  Return NULL so the
-	 * caller skips dev_kfree_skb(). */
-	if (unlikely(!skb))
+	/* IPsec compat-path frames have no associated skb.  The current CDX
+	 * compat path leaves these as NULL and lets the successful FMan egress
+	 * path own final buffer recycling.  Keep the marker branch for diagnostics
+	 * around older/experimental builds, but current CDX should not hit it.
+	 */
+#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
+	if (unlikely(skb == DPAA_IPSEC_COMPAT_TX_CONFIRM_RELEASE)) {
+		ipsec_percpu_priv->ipsec_txconf_marker_release++;
+		dpa_fd_release(NULL, fd);
 		return NULL;
+	}
+#endif
+	if (unlikely(!skb)) {
+#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
+		ipsec_percpu_priv->ipsec_txconf_null++;
+		if (fd->bpid == 35)
+			ipsec_percpu_priv->ipsec_txconf_bpid35++;
+#endif
+		return NULL;
+	}
 
 	if (unlikely(fd->format == qm_fd_sg)) {
 		nr_frags = skb_shinfo(skb)->nr_frags;
@@ -1712,6 +1742,39 @@ unsigned char* dpa_get_skb_nh(struct sk_buff* skb, unsigned short *l3_proto, uns
 }
 
 #if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
+static bool dpaa_ipsec_ipv4_tuple(struct sk_buff *skb,
+				       __be32 *saddr, __be32 *daddr)
+{
+	unsigned short l3_proto = 0, l3_offset = 0;
+	unsigned char *skb_nh;
+	struct iphdr *iph;
+
+	skb_nh = dpa_get_skb_nh(skb, &l3_proto, &l3_offset);
+	if (!skb_nh || l3_proto != htons(ETH_P_IP))
+		return false;
+
+	iph = (struct iphdr *)skb_nh;
+	*saddr = iph->saddr;
+	*daddr = iph->daddr;
+	return true;
+}
+
+static struct net_device *dpaa_ipsec_real_dpa_dev(struct net_device *net_dev)
+{
+	int depth = 0;
+
+	while (net_dev && is_vlan_dev(net_dev) && depth++ < 8)
+		net_dev = vlan_dev_real_dev(net_dev);
+
+	if (!net_dev || net_dev->type != ARPHRD_ETHER)
+		return NULL;
+
+	if (!dpa_is_private_netdev(net_dev))
+		return NULL;
+
+	return net_dev;
+}
+
 static struct sec_path *dpaa_recover_secpath_from_dst(struct sk_buff *skb)
 {
 	struct sec_path *sp;
@@ -1750,35 +1813,68 @@ static struct sec_path *dpaa_recover_secpath_from_dst(struct sk_buff *skb)
 
 #endif
 
- __hot void dpaa_submit_outb_pkt_to_SEC(struct sk_buff *skb, struct net_device *net_dev, struct dpa_bp *dpa_bp)
+int __hot dpaa_submit_outb_pkt_to_SEC(struct sk_buff *skb,
+				      struct net_device *net_dev,
+				      struct dpa_bp *dpa_bp)
 {
 	struct xfrm_state *x;
+	struct dpa_priv_s *priv = netdev_priv(net_dev);
+	struct dpa_percpu_priv_s *percpu_priv =
+		raw_cpu_ptr(priv->percpu_priv);
 	struct qman_fq *egress_fq = NULL;
 	struct qm_fd		 fd;
 	int err = 0,ii;
 	int new_ethhdr_end, old_ethhdr_end;
+	unsigned int sg_entries = 0;
 	unsigned short l3_proto, l3_offset;
 	unsigned char* skb_nh ;
+	struct sk_buff *list_skb;
 	struct sec_path *sp;
 	unsigned int dpovrd = 0;
 	u32 sa_handle = 0;
+	unsigned int sp_len = 0;
+	__be32 ipsec_saddr = 0, ipsec_daddr = 0;
+	bool have_ipsec_tuple;
 	const char *fail_reason = "unknown";
 
+	have_ipsec_tuple = dpaa_ipsec_ipv4_tuple(skb, &ipsec_saddr,
+						    &ipsec_daddr);
 	sp = skb_sec_path(skb);
 #if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
 	if (unlikely((!sp || !sp->len) && skb->ipsec_offload))
 		sp = dpaa_recover_secpath_from_dst(skb);
 #endif
+	if (sp)
+		sp_len = sp->len;
 
-	if (sp && sp->len) {
+	sg_entries = 1 + skb_shinfo(skb)->nr_frags;
+	skb_walk_frags(skb, list_skb)
+		sg_entries += 1 + skb_shinfo(list_skb)->nr_frags;
+	percpu_priv->ipsec_out_sg_entries += sg_entries;
+
+	if (skb_is_gso(skb))
+		percpu_priv->ipsec_out_gso++;
+	if (skb_is_nonlinear(skb))
+		percpu_priv->ipsec_out_nonlinear++;
+	if (skb_shinfo(skb)->frag_list)
+		percpu_priv->ipsec_out_fraglist++;
+
+	if (skb->ipsec_offload && skb->ipsec_sa_handle) {
+		sa_handle = skb->ipsec_sa_handle;
+	} else if (sp && sp->len) {
 		x = sp->xvec[0];
 		sa_handle = x->handle;
-	} else if (skb->ipsec_offload && skb->ipsec_sa_handle) {
-		sa_handle = skb->ipsec_sa_handle;
 	}
 
-	if (unlikely(!cdx_get_ipsec_fq_hookfn || !sa_handle)) {
-		fail_reason = "missing-hook-or-secpath";
+	if (unlikely(!cdx_get_ipsec_fq_hookfn)) {
+		fail_reason = "missing-hook";
+		percpu_priv->ipsec_out_no_hook++;
+		goto sec_submit_failed;
+	}
+
+	if (unlikely(!sa_handle)) {
+		fail_reason = "missing-sa-handle";
+		percpu_priv->ipsec_out_no_sa++;
 		goto sec_submit_failed;
 	}
 
@@ -1791,6 +1887,7 @@ static struct sec_path *dpaa_recover_secpath_from_dst(struct sk_buff *skb)
 		if (!egress_fq)
 		{
 			fail_reason = "fq-miss";
+			percpu_priv->ipsec_out_fq_miss++;
 			goto sec_submit_failed;	
 		}
 		/*
@@ -1806,6 +1903,7 @@ static struct sec_path *dpaa_recover_secpath_from_dst(struct sk_buff *skb)
 		{
 			if(l3_offset != ETH_HDR_SIZE)
 			{
+				percpu_priv->ipsec_out_l2_strip++;
 				new_ethhdr_end = l3_offset - 2  ; /*l3 offset - protocol(2bytes) */
 				old_ethhdr_end = ETHHDR_MACEND_OFFSET ;
 				while(old_ethhdr_end >= 0)
@@ -1831,14 +1929,22 @@ static struct sec_path *dpaa_recover_secpath_from_dst(struct sk_buff *skb)
 		if (unlikely(err < 0))
 		{
 			fail_reason = "fd-build-fail";
+			percpu_priv->ipsec_out_fd_fail++;
 			goto sec_submit_failed;
 		}
 
+		if (fd.format == qm_fd_compound)
+			percpu_priv->ipsec_out_compound++;
 
 		for (ii = 0; ii < 100000; ii++) {
 			err = qman_enqueue(egress_fq, &fd, 0);
 			if (err != -EBUSY)
 				break;
+		}
+		if (ii) {
+			percpu_priv->ipsec_out_enqueue_busy += ii;
+			if (ii > 1024 || err == -EBUSY)
+				percpu_priv->ipsec_out_enqueue_busy_high++;
 		}
 
 		if (unlikely(err < 0)) {
@@ -1846,6 +1952,7 @@ static struct sec_path *dpaa_recover_secpath_from_dst(struct sk_buff *skb)
 			dma_addr_t addr;
 
 			fail_reason = "enqueue-fail";
+			percpu_priv->ipsec_out_enqueue_fail++;
 			/* put the buffer back to sg pool */
 			addr = qm_fd_addr(&fd);
 			if (fd.format == qm_fd_compound)
@@ -1857,21 +1964,81 @@ static struct sec_path *dpaa_recover_secpath_from_dst(struct sk_buff *skb)
 			goto sec_submit_failed;
 		}
 		/* sucessful transmit to CAAM */
+		percpu_priv->ipsec_out_ok++;
 		netif_trans_update(net_dev);
 		ipsec_offload_pkt_cnt++;
-		return;
+		return 0;
 	}
 sec_submit_failed:
+	if (have_ipsec_tuple)
+		net_info_ratelimited("%s: ASK-IPSEC: outbound SEC submit failed reason=%s offload=%u skb_sagd=0x%x selected_sagd=0x%x sp_len=%u flow=%pI4->%pI4\n",
+				     net_dev->name, fail_reason,
+				     skb->ipsec_offload, skb->ipsec_sa_handle,
+				     sa_handle, sp_len, &ipsec_saddr,
+				     &ipsec_daddr);
+	else
+		net_info_ratelimited("%s: ASK-IPSEC: outbound SEC submit failed reason=%s offload=%u skb_sagd=0x%x selected_sagd=0x%x sp_len=%u\n",
+				     net_dev->name, fail_reason,
+				     skb->ipsec_offload, skb->ipsec_sa_handle,
+				     sa_handle, sp_len);
 	dev_kfree_skb(skb);
-	return;
+	return -1;
 
 }
 
 EXPORT_SYMBOL(dpaa_submit_outb_pkt_to_SEC);
 
-#ifdef UNIT_TEST
-unsigned char temp_ethhdr[16];
+int __hot dpaa_ipsec_xmit_compat_fd(struct net_device *net_dev,
+				    struct qm_fd *fd)
+{
+	struct dpa_priv_s *priv;
+	struct dpa_percpu_priv_s *percpu_priv;
+	struct qman_fq *egress_fq;
+	struct qman_fq *conf_fq;
+	unsigned int queue;
+	int err;
+
+	if (!net_dev || !fd || !qm_fd_addr(fd) || !fd->length20)
+		return -EINVAL;
+	if (fd->format != qm_fd_contig && fd->format != qm_fd_sg)
+		return -EINVAL;
+	if (!dpa_is_private_netdev(net_dev))
+		return -ENODEV;
+
+	priv = netdev_priv(net_dev);
+	if (!priv || !priv->percpu_priv)
+		return -ENODEV;
+
+	if (dpaa_ipsec_compat_tx_queue < 0)
+		queue = raw_smp_processor_id() % DPAA_ETH_TX_QUEUES;
+	else
+		queue = dpaa_ipsec_compat_tx_queue % DPAA_ETH_TX_QUEUES;
+#if defined(CONFIG_CPE_FAST_PATH) || defined(CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER)
+	if (priv->ceetm_en) {
+		if (!ceetm_fqget_func || !priv->qm_ctx)
+			return -ENODEV;
+
+		egress_fq = ceetm_fqget_func(priv->qm_ctx, 0,
+					     ASK_CEETM_DEFAULT_CLASS_QUEUE, 0);
+		if (!egress_fq)
+			return -ENODEV;
+	} else
 #endif
+	egress_fq = priv->egress_fqs[queue];
+	conf_fq = priv->conf_fqs[queue];
+	if (!egress_fq || !conf_fq)
+		return -ENODEV;
+
+	percpu_priv = raw_cpu_ptr(priv->percpu_priv);
+	err = dpa_xmit(priv, &percpu_priv->stats, fd, egress_fq, conf_fq);
+	if (unlikely(err < 0))
+		return err;
+
+	netif_trans_update(net_dev);
+	return 0;
+}
+EXPORT_SYMBOL(dpaa_ipsec_xmit_compat_fd);
+
 /* This function is invoked from xfrm_input.c to submit IPSEC packets
    to SEC engine, if the corresponding SA is programmed in ucode
 */
@@ -1881,15 +2048,18 @@ int dpaa_submit_inb_pkt_to_SEC(struct sk_buff *skb, uint16_t sagd)
 	struct dpa_priv_s	*priv = NULL;
 	struct dpa_percpu_priv_s *percpu_priv = NULL;
 	struct qm_fd		 fd;
-	int err, ii, ret;
+	int err, ii;
 	uint8_t tmp_len = 0, data[ETH_HLEN],ipvsn;
 	struct net_device *netdev;
 	struct device* dev;
-	unsigned char hdroom_realloced = 0;
-#ifdef UNIT_TEST
-	unsigned short dev_type = skb->dev->type;
-#endif
 	struct net_device *real_dev = NULL;
+	int iif;
+
+	if (!cdx_get_ipsec_fq_hookfn) {
+		net_warn_ratelimited("ASK-IPSEC: inbound SEC submit failed reason=missing-hook sagd=0x%x\n",
+				     sagd);
+		return -1;
+	}
 
 	if (cdx_get_ipsec_fq_hookfn)
 	{
@@ -1901,6 +2071,18 @@ int dpaa_submit_inb_pkt_to_SEC(struct sk_buff *skb, uint16_t sagd)
 		/*if no SEC FQID found, return non-zero to return pkt to linux*/
 		if (!sec_fq || !(skb->dev))
 		{
+			real_dev = dpaa_ipsec_real_dpa_dev(skb->dev);
+			if (!sec_fq && real_dev) {
+				priv = netdev_priv(real_dev);
+				percpu_priv = raw_cpu_ptr(priv->percpu_priv);
+				percpu_priv->ipsec_in_no_fq++;
+				priv = NULL;
+				percpu_priv = NULL;
+			}
+			net_warn_ratelimited("ASK-IPSEC: inbound SEC submit failed reason=%s sagd=0x%x dev=%s\n",
+					     sec_fq ? "missing-skb-dev" : "fq-miss",
+					     sagd,
+					     skb->dev ? skb->dev->name : "-");
 			return -1; /* give packet to linux */
 		}
 #ifdef UNIT_TEST
@@ -1912,7 +2094,13 @@ int dpaa_submit_inb_pkt_to_SEC(struct sk_buff *skb, uint16_t sagd)
 		if (skb->dev->type == ARPHRD_ETHER) 
 		{
 			/* Get the corresponding physical device info, if the skb->dev corresponds to vlan*/
-			real_dev = is_vlan_dev(skb->dev) ? vlan_dev_real_dev(skb->dev) : skb->dev;
+			real_dev = dpaa_ipsec_real_dpa_dev(skb->dev);
+			if (!real_dev) {
+				net_warn_ratelimited("ASK-IPSEC: inbound SEC submit failed reason=ether-not-dpa sagd=0x%x dev=%s type=%u\n",
+						     sagd, skb->dev->name,
+						     skb->dev->type);
+				return -1;
+			}
 			priv = netdev_priv(real_dev);
 			/* SEC shared descriptor designed to take packet including MAC hdr */
 			/* modify skb->data to point to MAC hdr */
@@ -1923,12 +2111,34 @@ int dpaa_submit_inb_pkt_to_SEC(struct sk_buff *skb, uint16_t sagd)
 		else if (skb->dev->type == ARPHRD_PPP)
 		{
 			/* Get the corresponding physica device info */
-			netdev = __dev_get_by_index(dev_net(skb->dev), skb->iif_index);
+#if IS_ENABLED(CONFIG_NF_CONNTRACK)
+			iif = skb->layerscape_underlying_iif ?
+				skb->layerscape_underlying_iif : skb->skb_iif;
+#else
+			iif = skb->skb_iif;
+#endif
+			netdev = __dev_get_by_index(dev_net(skb->dev), iif);
 			if (!netdev)
 			{
+				net_warn_ratelimited("ASK-IPSEC: inbound SEC submit failed reason=iif-miss sagd=0x%x iif=%d dev=%s\n",
+						     sagd, iif, skb->dev->name);
 				return -1;
 			}
-			priv = netdev_priv(netdev);
+			real_dev = dpaa_ipsec_real_dpa_dev(netdev);
+			if (!real_dev) {
+				net_warn_ratelimited("ASK-IPSEC: inbound SEC submit failed reason=ppp-iif-not-dpa sagd=0x%x iif=%d dev=%s resolved=%s type=%u\n",
+						     sagd, iif, skb->dev->name,
+						     netdev->name, netdev->type);
+				return -1;
+			}
+			if (skb_headroom(skb) < ETH_HLEN + PPPOE_SES_HLEN) {
+				net_warn_ratelimited("ASK-IPSEC: inbound SEC submit failed reason=ppp-headroom sagd=0x%x dev=%s headroom=%u need=%u\n",
+						     sagd, skb->dev->name,
+						     skb_headroom(skb),
+						     ETH_HLEN + PPPOE_SES_HLEN);
+				return -1;
+			}
+			priv = netdev_priv(real_dev);
 			/* observation in case of PPPoE skb_mac_header is pointing to IP header*/
 			/* get the IP version*/
 			/*printk("%s(%d), MAC header ptr: \n",
@@ -1962,49 +2172,24 @@ int dpaa_submit_inb_pkt_to_SEC(struct sk_buff *skb, uint16_t sagd)
 			  __FUNCTION__,__LINE__);
 			  display_buf_data(skb->data,16);*/
 		}
-
-		if (skb->dev->wifi_offload_dev)
-		{
-			dev = dpa_get_bp_device();
-			netdev = skb->dev;
-			/* Following code is added for cellular interfaces */
-			/* FIX :May be we can check for device type as ARPHRD_NONE */
-			if (skb->mac_len == 0)
-			{
-				tmp_len = (skb->data - skb_network_header(skb));
-				skb->len += tmp_len;
-				skb->data = skb_network_header(skb);
-#ifdef UNIT_TEST
-				memcpy(temp_ethhdr, (skb->data - ETH_HLEN), 12);
-#endif
-				/* Add mac_header */
-				ret = dpa_add_dummy_eth_hdr(&skb, 0, &hdroom_realloced);
-				if (ret < 0)
-					return -1;
-
-				skb->data -= ETH_HLEN;
-				skb->len += ETH_HLEN;
-				tmp_len += ETH_HLEN;
-#ifdef UNIT_TEST
-				memcpy(skb->data ,temp_ethhdr,12);
-				skb->dev->type = dev_type;
-				skb->mac_len = ETH_HLEN;
-#endif
-			}
+		if (!priv) {
+			net_warn_ratelimited("ASK-IPSEC: inbound SEC submit failed reason=no-priv sagd=0x%x dev=%s\n",
+					     sagd, skb->dev ? skb->dev->name : "-");
+			return -1;
 		}
-		else
-		{
-			if (!priv)
-				return -1;
-			dev = priv->dpa_bp->dev;
-			netdev = priv->net_dev;
-		}
+		dev = priv->dpa_bp->dev;
+		netdev = priv->net_dev;
+		percpu_priv = raw_cpu_ptr(priv->percpu_priv);
 		/*FIXME: skb->dev->type other than ARPHRD_ETHER and ARPHRD_PPP priv is uninitialized. Here else case should add to address it. */
 		/*net_crit_ratelimited("%s(%d) x->handle %d, skb->data %p, machdr %p, len %d, skb->dev %p\n",
 			__FUNCTION__,__LINE__, sagd, skb->data, skb_mac_header(skb),skb->len, skb->dev); */
 		err =  skb_fraglist_to_sg_fd(dev, netdev, skb, &fd, 0);
 		if (unlikely(err < 0))
 		{
+			percpu_priv->ipsec_in_fd_fail++;
+			net_info_ratelimited("%s: ASK-IPSEC: inbound SEC submit failed reason=fd-build sagd=0x%x dev=%s\n",
+					     netdev->name, sagd,
+					     skb->dev ? skb->dev->name : "-");
 			if (skb->dev->type == ARPHRD_PPP)
 				memcpy(skb->data, data, ETH_HLEN);
 
@@ -2023,18 +2208,23 @@ int dpaa_submit_inb_pkt_to_SEC(struct sk_buff *skb, uint16_t sagd)
 			struct bm_buffer bmb;
 			dma_addr_t addr;
 
-			printk("%s(%d) qman_enqueue failed\n",
-					__FUNCTION__,__LINE__);
+			percpu_priv->ipsec_in_enqueue_fail++;
+			net_info_ratelimited("%s: ASK-IPSEC: inbound SEC submit failed reason=enqueue sagd=0x%x err=%d\n",
+					     netdev->name, sagd, err);
 			/* put the buffer back to sg pool */
 			addr = qm_fd_addr(&fd);
 			bm_buffer_set64(&bmb, addr);
 			while (bman_release(sg_bpool_g->pool, &bmb, 1, 0))
 				cpu_relax();
+			if (skb->dev->type == ARPHRD_PPP)
+				memcpy(skb->data, data, ETH_HLEN);
+			skb->len -= tmp_len;
+			skb->data += tmp_len;
 			return -1; /* give packet to linux */
 		}
 		if (priv)
 		{
-			percpu_priv = raw_cpu_ptr(priv->percpu_priv);
+			percpu_priv->ipsec_in_ok++;
 			percpu_priv->tx_caam_dec++;
 		}
 	}
@@ -2063,6 +2253,7 @@ int cpe_fp_tx(struct sk_buff *skb, struct net_device *net_dev)
 	uint16_t l3_proto = 0, l3_offset = 0;
 
 	priv = netdev_priv(net_dev);
+	percpu_priv = raw_cpu_ptr(priv->percpu_priv);
 #ifdef CONFIG_XFRM
 #if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
 	sp = skb_sec_path(skb);
@@ -2075,9 +2266,8 @@ int cpe_fp_tx(struct sk_buff *skb, struct net_device *net_dev)
 		goto no_sec_submit;
 
 	if (skb->ipsec_offload || (sp && sp->len)) {
-		dpaa_submit_outb_pkt_to_SEC(skb, net_dev, priv->dpa_bp);
-		percpu_priv = raw_cpu_ptr(priv->percpu_priv);
-		percpu_priv->tx_caam_enc++;
+		if (!dpaa_submit_outb_pkt_to_SEC(skb, net_dev, priv->dpa_bp))
+			percpu_priv->tx_caam_enc++;
 		return NETDEV_TX_OK;
 	}
 #endif
@@ -2142,8 +2332,6 @@ no_sec_submit:
 #endif
 
 #ifdef CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER
-#define ASK_CEETM_DEFAULT_CLASS_QUEUE	0
-
 static void ask_ceetm_tx_drop(struct dpa_priv_s *priv, struct sk_buff *skb)
 {
 	struct dpa_percpu_priv_s *percpu_priv;
@@ -2225,6 +2413,27 @@ int __hot dpa_tx(struct sk_buff *skb, struct net_device *net_dev)
 	int queue_mapping = dpa_get_queue_mapping(skb);
 	struct qman_fq *egress_fq, *conf_fq;
 
+	priv = netdev_priv(net_dev);
+
+#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
+	if (skb->ipsec_offload || skb_sec_path(skb)) {
+		struct dpa_percpu_priv_s *percpu_priv =
+			raw_cpu_ptr(priv->percpu_priv);
+
+		percpu_priv->ipsec_tx_entry++;
+	}
+
+	if (skb->ipsec_offload) {
+		struct dpa_percpu_priv_s *percpu_priv =
+			raw_cpu_ptr(priv->percpu_priv);
+
+		percpu_priv->ipsec_tx_direct++;
+		if (!dpaa_submit_outb_pkt_to_SEC(skb, net_dev, priv->dpa_bp))
+			percpu_priv->tx_caam_enc++;
+		return NETDEV_TX_OK;
+	}
+#endif
+
 #ifdef CONFIG_FSL_DPAA_HOOKS
 	/* If there is a Tx hook, run it. */
 	if (dpaa_eth_hooks.tx &&
@@ -2236,8 +2445,6 @@ int __hot dpa_tx(struct sk_buff *skb, struct net_device *net_dev)
 #ifdef CONFIG_CPE_FAST_PATH
 	return cpe_fp_tx(skb, net_dev);
 #endif
-
-	priv = netdev_priv(net_dev);
 
 #ifdef CONFIG_FSL_DPAA_ASK_CEETM_TX_OWNER
 	if (priv->ceetm_en)
