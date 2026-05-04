@@ -10,16 +10,16 @@ include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=ask-cdx
 PKG_VERSION:=5.03.1
-PKG_RELEASE:=8
+PKG_RELEASE:=45
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/cvandesande/ask-cdx.git
 # When PKG_SOURCE_VERSION changes, run this and update PKG_MIRROR_HASH:
 #   scripts/mono-check-vendor-hashes.sh package/kernel/ask-cdx
-PKG_SOURCE_VERSION:=5338b8671ed8870515b4b31009a16d1d2bdddb6f
+PKG_SOURCE_VERSION:=cc26aa227456252d1ef691d89d2677988c9be417
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
 PKG_SOURCE:=$(PKG_SOURCE_SUBDIR).tar.zst
-PKG_MIRROR_HASH:=4cbafc0c5337ebaf68ece9ebe72c3c79d83465eb50a1fa99e063fa041a7ad2a9
+PKG_MIRROR_HASH:=401e99a6961c2e17b2b1db018d32330e4f823c338eb55521717c423cc932985c
 PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
 PKG_LICENSE:=GPL-2.0-or-later
@@ -43,13 +43,13 @@ endef
 
 CDX_DIR:=$(PKG_BUILD_DIR)/cdx-$(PKG_VERSION)
 
-# Keep Stage 2 on the wired first-class only. WiFi and IPsec stay on their
-# later milestones and are compiled in only when their flags are re-enabled.
+# Keep Stage 2 on the wired first-class only. WiFi stays deferred; this
+# milestone compiles the IPsec hook points needed by ASK/CDX/CMM.
 CDX_MAKE_OPTS:= \
 	PLATFORM=LS1043A \
 	KERNELDIR="$(LINUX_DIR)" \
 	KERNEL_SRC="$(LINUX_DIR)" \
-	CFG_FLAGS="-DSEC_PROFILE_SUPPORT -DVLAN_FILTER -DENABLE_EGRESS_QOS -DCONFIG_FSL_DPAA_ETH_REFILL_THRESHOLD=80"
+	CFG_FLAGS="-DSEC_PROFILE_SUPPORT -DVLAN_FILTER -DENABLE_EGRESS_QOS -DCONFIG_FSL_DPAA_ETH_REFILL_THRESHOLD=80 -DCONFIG_INET_IPSEC_OFFLOAD -DCONFIG_INET6_IPSEC_OFFLOAD"
 
 define Build/Compile
 	$(KERNEL_MAKE) \
