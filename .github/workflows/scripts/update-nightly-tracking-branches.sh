@@ -135,9 +135,6 @@ prepare() {
 	fi
 
 	exclude_ref="$(remote_ref "$MAIN_BRANCH")"
-	if remote_branch_exists "$MONO_OSS_NEXT_BRANCH"; then
-		exclude_ref="$(remote_ref "$MONO_OSS_NEXT_BRANCH")"
-	fi
 
 	git switch --force-create "$MAIN_BRANCH" "$upstream_main_ref"
 	restore_paths_from_ref "$exclude_ref"
