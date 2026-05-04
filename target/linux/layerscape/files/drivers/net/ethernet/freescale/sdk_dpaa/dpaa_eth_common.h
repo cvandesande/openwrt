@@ -98,10 +98,16 @@ typedef enum dpaa_eth_hook_result (*dpaa_eth_confirm_hook_t)(
 		struct net_device *net_dev, const struct qm_fd *fd, u32 fqid);
 
 #if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
+#define DPAA_IPSEC_COMPAT_TX_CONFIRM_RELEASE ((struct sk_buff *)~0UL)
+
 typedef struct qman_fq *(*cdx_get_ipsec_fq_hook_t)(u32 handle);
 int dpa_register_ipsec_fq_handler(cdx_get_ipsec_fq_hook_t hookfn);
 int dpaa_submit_inb_pkt_to_SEC(struct sk_buff *skb, uint16_t sagd);
- __hot void dpaa_submit_outb_pkt_to_SEC(struct sk_buff *skb, struct net_device *net_dev, struct dpa_bp *dpa_bp);
+int __hot dpaa_submit_outb_pkt_to_SEC(struct sk_buff *skb,
+				      struct net_device *net_dev,
+				      struct dpa_bp *dpa_bp);
+int __hot dpaa_ipsec_xmit_compat_fd(struct net_device *net_dev,
+				    struct qm_fd *fd);
 int dpaa_ipsec_release_compound_reclaim_ctx(const struct qm_fd *fd);
 
 #endif
