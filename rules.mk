@@ -458,7 +458,7 @@ ifneq ($(wildcard $(STAGING_DIR_HOST)/bin/flock),)
 	SHELL= \
 	flock \
 		$(TMP_DIR)/.$(if $(2),$(strip $(2)),global).flock \
-		-c '$(subst ','\'',$(1))'
+		-c '$(subst ','\'',$(strip $(1)))'
   endef
 else
   locked=$(1)
