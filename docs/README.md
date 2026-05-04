@@ -3,11 +3,12 @@
 This documentation set describes the current Mono OpenWrt fork as it exists
 today:
 
-- a boxed NXP ASK/FMAM/DPAA hardware-acceleration port for Mono Gateway
+- an NXP ASK/FMAM/DPAA hardware-acceleration port for Mono Gateway
 - an OpenWrt-first integration repo with pinned vendor package sources
 - a staged validation path from kernel bring-up to true hardware offload
-- the bounded upload-side CEETM hardware egress-shaping proof on the current
+- the upload-side CEETM hardware egress-shaping proof on the current
   WAN path
+- the current IPv4 tunnel-mode IPsec SEC-offload baseline
 
 Read in this order:
 
