@@ -10,16 +10,16 @@ include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=ask-cdx
 PKG_VERSION:=5.03.1
-PKG_RELEASE:=46
+PKG_RELEASE:=47
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/cvandesande/ask-cdx.git
 # When PKG_SOURCE_VERSION changes, run this and update PKG_MIRROR_HASH:
 #   scripts/mono-check-vendor-hashes.sh package/kernel/ask-cdx
-PKG_SOURCE_VERSION:=5cbda734db7ecd77a0b75672575b0a6d54b3c532
+PKG_SOURCE_VERSION:=fd41ab2027477b43d60bae1d125183ccc790406b
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
 PKG_SOURCE:=$(PKG_SOURCE_SUBDIR).tar.zst
-PKG_MIRROR_HASH:=8b3e4bfe045722fb8f25e520e88fe383516ffc6fdf127ff8bfacd2c8ff369976
+PKG_MIRROR_HASH:=4c14aa927e3edcb8abad9418e6b7cd75c50b4a6a30dc22b5a8e9a6e6c2c6d9c2
 PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
 PKG_LICENSE:=GPL-2.0-or-later
