@@ -26,6 +26,25 @@ only the current status snapshot.
   reboot/reconnect/reload behavior, cleanup, rebase hygiene, and final
   operator readiness.
 
+## Runtime FMAN Microcode
+
+Runtime check on May 5, 2026, against the lab router showed the kernel using
+FMAN controller code `210.10.1`:
+
+```text
+FM_Config(3425) FMan-Controller code (ver 210.10.1) (0xd20a01)
+```
+
+The live device tree also contains an embedded
+`/soc/fman@1a00000/fman-firmware` node whose `fsl,firmware` property reports
+`Microcode version 210.10.1 for LS1043 r1.0`. That satisfies the ASK package
+number requirement used by the `mt-6.12.y` CDX microcode guard.
+
+The OpenWrt rootfs currently also contains `/boot/fman-ucode.bin`, but that file
+reports `106.4.18`. Current evidence points to Linux using the bootloader-provided
+device-tree firmware, not the `/boot` copy. Treat the `/boot` file as misleading
+until its fallback role is proven.
+
 ## IPsec Status
 
 The first IPv4 tunnel-mode IPsec SEC-offload baseline is validated on the
