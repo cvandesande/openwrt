@@ -395,7 +395,7 @@ diff --git a/net/key/af_key.c b/net/key/af_key.c
  	if (atomic_read(&net_pfkey->socks_nr) == 0)
  		return 0;
  
-@@ -3857,6 +3993,429 @@
+@@ -3857,6 +3993,435 @@
  }
  #endif
  
@@ -746,7 +746,13 @@ diff --git a/net/key/af_key.c b/net/key/af_key.c
 +	struct nlmsghdr *nlh;
 +	unsigned int len;
 +
++	if (!netlink_capable(skb, CAP_NET_ADMIN))
++		return;
++
 +	nlh = nlmsg_hdr(skb);
++	if (!nlmsg_ok(nlh, skb->len))
++		return;
++
 +	len = nlmsg_len(nlh);
 +	if (len < NLKEY_HDR_LEN)
 +		return;
