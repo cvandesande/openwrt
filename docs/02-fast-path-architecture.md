@@ -410,6 +410,41 @@ bridge, route, NAT, tunnel, WiFi, sysupgrade, bootloader, DTS, or storage
 behavior. That would repeat the maintenance problem this fork is designed to
 avoid.
 
+## ASK `mt-6.12.y` Maintenance Review
+
+The local `ASK` checkout was reviewed against `origin/mt-6.12.y` as a source of
+bug fixes and maintenance work. Treat it as source material, not as a replacement
+for this OpenWrt integration tree.
+
+The useful follow-up work is:
+
+| Action | Candidate | Area | Reason |
+| --- | --- | --- | --- |
+| Import now | `kzalloc(..., 0)` to `GFP_KERNEL` | `ask-cdx` | Kernel allocations should use explicit GFP flags. Local CDX still has these call sites. |
+| Import now | procfs pointer-output cleanup | `ask-cdx` | Avoid exposing kernel pointers in user-visible procfs output. |
+| Import now | multicast `&` to `&&` | `ask-cmm` | Fix warning-prone boolean logic in IPv4 and IPv6 multicast command parsing. |
+| Import now | libxml2 compatibility guards | `fmc` package patch | Current OpenWrt uses newer libxml2 headers, so FMC should carry the guarded callback and line-number handling. |
+| Import later as separate patch | CDX FMAN microcode gate | `ask-cdx` plus SDK FMAN wrapper | Runtime check on May 5, 2026 showed FMAN controller code `210.10.1`, so the ASK package check should pass on the lab router. Keep this as a separate safety patch because it changes module-load behavior. |
+| Deeper review | FCI command-buffer API cleanup | `fci` and `ask-cmm` | Replacing legacy `unsigned short *` command buffers with `void *` is likely cleaner, but it crosses the libfci API, CMM call sites, package pins, and hashes. |
+
+Items intentionally not pulled into the current work:
+
+| Decision | Candidate | Reason |
+| --- | --- | --- |
+| Already covered | libnetfilter conntrack ASK attributes | Local OpenWrt package and kernel ABI patches already carry equivalent runtime-state attributes. |
+| Already covered | `dpa_app` port/distribution bounds fix | Local build source already uses the fixed per-FMAN port handling. |
+| Already covered | `ROUTE_EXTRA_INFO` destination pointer fix | Local CDX already uses the IPv6-sized destination storage. |
+| Defer | QOSMARK/iptables extension migration | This belongs with a future CEETM/QoS queue-steering milestone, not the current cleanup pass. |
+| Defer | auto-bridge warning and netns cleanup | There is no active OpenWrt `ask-auto-bridge` package in this tree. Review only if auto-bridge becomes an active deliverable. |
+| Do not import | `fm_muram` patch-header and symbol fixes | This tree uses source files rather than that malformed vendor patch path, and MURAM changes are boot/dataplane sensitive. |
+| Do not import | GCC14 packed-member cast workaround | Superseded by the cleaner FCI command-buffer API cleanup if that later review is accepted. |
+
+The `/boot/fman-ucode.bin` file in the current image reports FMAN microcode
+`106.4.18`, but runtime evidence shows Linux using bootloader-provided device-tree
+firmware `210.10.1`. Do not rely on the `/boot` copy as proof of the active
+microcode version. Either remove it from the Mono image or document it as unused
+unless a real fallback path is proven.
+
 ## Future Architecture Work
 
 Future architecture work still includes:
