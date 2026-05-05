@@ -9,16 +9,16 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ask-cmm
 PKG_VERSION:=17.03.1
-PKG_RELEASE:=22
+PKG_RELEASE:=23
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/cvandesande/ask-cmm.git
 # When PKG_SOURCE_VERSION changes, run this and update PKG_MIRROR_HASH:
 #   scripts/mono-check-vendor-hashes.sh package/network/ask-cmm
-PKG_SOURCE_VERSION:=ad99aa8bac6a313260a3afb75839b4e544c4d784
+PKG_SOURCE_VERSION:=334043ce2a9a42a3a94fc31bc6018ebd13788e8c
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
 PKG_SOURCE:=$(PKG_SOURCE_SUBDIR).tar.zst
-PKG_MIRROR_HASH:=7ab8aa165bc82c87c8f42afbeef349397c3527bc25702ffd8f33de9ac0980258
+PKG_MIRROR_HASH:=40d70e7a6952b537c33de7c028116cd9f6ce38b4dc90a8fffa7f818f01212de3
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
 PKG_LICENSE:=GPL-2.0-or-later
