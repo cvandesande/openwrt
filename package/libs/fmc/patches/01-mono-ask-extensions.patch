@@ -6,6 +6,7 @@ Add support for:
 - Port ID (portid) field in port configuration output
 - Shared scheme support with CC/HT node replication
 - Fix PPPoE nextp field name (NET_HEADER_FIELD_PPPoE_PID)
+- libxml2 2.12+ compatibility guards
 
 These extensions are required for the CMM daemon and fast path offload
 functionality on the Mono Gateway.
@@ -33,6 +34,42 @@ index 2a3d257..54b6f21 100644
      if (sch.bypass) {
          EMIT4( scheme[, index, ].bypassFqidGeneration =, sch.bypass );
      }
+diff --git a/source/FMCGenericError.cpp b/source/FMCGenericError.cpp
+index 0bbd284..5ba2f2b 100644
+--- a/source/FMCGenericError.cpp
++++ b/source/FMCGenericError.cpp
+@@ -33,7 +33,11 @@
+ #include "FMCUtils.h"
+ #include "logger.hpp"
+ 
++#if LIBXML_VERSION >= 21200
+ void errorFuncHandler( void * ctx, const xmlError * error )
++#else
++void errorFuncHandler( void * ctx, xmlError * error )
++#endif
+ {
+     char *filestr = (char*)"";
+     char *msgstr  = (char*)"";
+diff --git a/source/FMCGenericError.h b/source/FMCGenericError.h
+index 4bd05b2..ddefce1 100644
+--- a/source/FMCGenericError.h
++++ b/source/FMCGenericError.h
+@@ -32,10 +32,15 @@
+ 
+ #include <string>
+ #include <libxml/parser.h>
++#include <libxml/xmlversion.h>
+ 
+ const int NO_LINE = -1;
+ 
++#if LIBXML_VERSION >= 21200
+ void errorFuncHandler( void * ctx, const xmlError * error );
++#else
++void errorFuncHandler( void * ctx, xmlError * error );
++#endif
+ 
+ 
+ class CGenericError {
 diff --git a/source/FMCPCDModel.cpp b/source/FMCPCDModel.cpp
 index d785eee..bea0cac 100755
 --- a/source/FMCPCDModel.cpp
@@ -240,6 +277,21 @@ index 696eb79..2789d52 100755
  };
 
  #endif // FMCMODEL_H
+diff --git a/source/FMCPDLReader.cpp b/source/FMCPDLReader.cpp
+index f8eb076..a7970a4 100644
+--- a/source/FMCPDLReader.cpp
++++ b/source/FMCPDLReader.cpp
+@@ -116,7 +116,10 @@ CPDLReader::parseNetPDL( std::string filename )
+     // LibXML preparations
+     xmlInitParser();
+     // init line numbers - critical for Linux
++    // (no-op and deprecated in libxml2 2.12+, where line numbers are always on)
++#if LIBXML_VERSION < 21200
+     xmlLineNumbersDefault(1);
++#endif
+ 
+     LIBXML_TEST_VERSION;
+     xmlSetStructuredErrorFunc( &error, errorFuncHandler );
 diff --git a/source/fmc.h b/source/fmc.h
 index 700ce41..0657530 100644
 --- a/source/fmc.h
