@@ -20,6 +20,31 @@ commitment to open design.
 Mono updates and related videos are also available on the
 [Tomaž Zaman YouTube channel](https://www.youtube.com/@tomazzaman).
 
+## What Makes This Fork Different
+
+This fork takes a different approach from the Mono-provided OpenWRT-ASK tree.
+OpenWRT-ASK remains the vendor reference, but this tree keeps OpenWrt in charge
+of normal router behavior: configuration, services, firewall and routing
+decisions, packages, images, and sysupgrade.
+
+OpenWRT-ASK keeps the NXP hardware acceleration stack together as one large
+firmware integration. That makes sense for a vendor image: the hardware pieces
+are developed and tested together. The tradeoff is that acceleration code
+reaches into several parts of Linux networking at the same time, including the
+Ethernet driver, connection tracking, VLAN/PPPoE/bridge handling, IPsec, and
+QoS. That can make later Linux and OpenWrt updates harder, because more of the
+networking stack has to move together.
+
+This fork keeps those contact points smaller and easier to inspect. Linux still
+decides what traffic is allowed and where it should go. The ASK components then
+program eligible traffic into hardware offload. Traffic that cannot use
+hardware offload stays on the normal Linux path. The goal is to make the port
+easier to update as OpenWrt and Linux change.
+
+The result is meant to feel like OpenWrt first: normal build commands, normal
+packages, normal services, and native sysupgrade, with the Mono Gateway
+hardware offload added where it is needed.
+
 ## Before You Install
 
 Use this port if you are comfortable with OpenWrt, backing up and restoring
