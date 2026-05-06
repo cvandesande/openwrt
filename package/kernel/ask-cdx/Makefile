@@ -30,7 +30,7 @@ include $(INCLUDE_DIR)/package.mk
 define KernelPackage/ask-cdx
   SUBMENU:=Network Devices
   TITLE:=NXP ASK CDX fast path module
-  DEPENDS:=@TARGET_layerscape
+  DEPENDS:=@TARGET_layerscape +kmod-ipsec4 +kmod-ipsec6
   FILES:=$(PKG_BUILD_DIR)/cdx-$(PKG_VERSION)/cdx.ko
   URL:=https://github.com/cvandesande/ask-cdx
 endef

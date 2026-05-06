@@ -1,0 +1,44 @@
+# Minimal SELinux bring-up seed for the current Mono Gateway DK image.
+#
+# Expand this into a full .config with:
+#   cp config/mono_gateway-dk-selinux.seed .config
+#   make defconfig
+#
+# This starts from the normal Mono Gateway DK image and enables SELinux for
+# developer testing. The policy is intentionally permissive during bring-up;
+# see package/system/selinux-policy/files/selinux-config.
+
+CONFIG_TARGET_layerscape=y
+CONFIG_TARGET_layerscape_armv8_64b=y
+CONFIG_TARGET_layerscape_armv8_64b_DEVICE_mono_gateway-dk=y
+
+CONFIG_PACKAGE_ask-cmm=y
+CONFIG_PACKAGE_ask-dpa-app=y
+CONFIG_PACKAGE_kmod-ask-fci=y
+
+CONFIG_PACKAGE_luci=y
+
+CONFIG_PACKAGE_ppp=y
+CONFIG_PACKAGE_ppp-mod-pppoe=y
+
+# VPN management UI and baseline WireGuard support.
+CONFIG_PACKAGE_luci-app-strongswan-swanctl=y
+CONFIG_PACKAGE_luci-proto-wireguard=y
+CONFIG_PACKAGE_wireguard-tools=y
+CONFIG_PACKAGE_kmod-wireguard=y
+
+# Software IPsec baseline.  Keep this independent of ASK/CDX hardware
+# acceleration until the plain kernel XFRM path has soaked.
+CONFIG_PACKAGE_strongswan=y
+CONFIG_PACKAGE_strongswan-default=y
+CONFIG_PACKAGE_strongswan-mod-gcm=y
+CONFIG_PACKAGE_strongswan-mod-kdf=y
+CONFIG_PACKAGE_strongswan-swanctl=y
+CONFIG_PACKAGE_kmod-crypto-gcm=y
+
+# SELinux developer bring-up. Start permissive and use audit output to iterate
+# policy before considering enforcing mode.
+CONFIG_SELINUX=y
+CONFIG_SELINUXTYPE_dssp=y
+CONFIG_PACKAGE_auditd=y
+CONFIG_PACKAGE_audit-utils=y

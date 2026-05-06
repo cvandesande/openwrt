@@ -82,7 +82,7 @@ $(call Package/audit/Default)
   SECTION:=admin
   CATEGORY:=Administration
   TITLE+= (daemon)
-  DEPENDS:= +libaudit +libauparse +audit-utils +libev
+  DEPENDS:= +libaudit +libauparse +audit-utils
 endef
 
 define Package/auditd/description
