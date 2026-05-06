@@ -45,6 +45,26 @@ reports `106.4.18`. Current evidence points to Linux using the bootloader-provid
 device-tree firmware, not the `/boot` copy. Treat the `/boot` file as misleading
 until its fallback role is proven.
 
+## Current Audit And Maintenance Fixes
+
+The May 6, 2026 image includes the first-pass ASK security and reliability audit
+fixes, limited to owned vendor repositories and the 700-series OpenWrt ASK
+integration patches:
+
+| Fix area | Delivered as | Runtime or validation check |
+| --- | --- | --- |
+| ASK NLKEY receive-path hardening | OpenWrt 700-series XFRM patch, revision `r34318-64b2feacfa` | Flashed router reports `OpenWrt SNAPSHOT r34318-64b2feacfa`. |
+| PFE cdev and ioctl hardening | OpenWrt 700-series PFE patches | Target kernel compile passed; focused `pfe_cdev.o` compile passed. The lab router did not expose a PPFE runtime module or cdev. |
+| CDX SAGD lookup, XFRM cleanup, allocation flags, and procfs pointer formatting | `kmod-ask-cdx-6.12.85.5.03.1-r48` | Installed on the lab router; `cdx` module loaded; installed module contains `contexta\t%pK` and not the stale raw `contexta\t%llx` or `proc_entry %px` strings. |
+| CMM IPC sizing and multicast cleanup | `ask-cmm-17.03.1-r23` | Installed on the lab router; `/usr/sbin/cmm` running. |
+| libFCI netlink response validation | `libfci-9.00.12-r5` | Installed on the lab router. |
+| FMC libxml2 2.12+ compatibility guards | `fmc-6.12.49-r2` with `libxml2-16-2.15.1-r1` | Installed on the lab router; `fmc --help` runs. |
+
+These checks confirm the fixed packages and binaries are present on the flashed
+router. Follow-up traffic tests passed after flashing this build. Use
+hardware-counter evidence separately when making hardware-offload residency
+claims.
+
 ## IPsec Status
 
 The first IPv4 tunnel-mode IPsec SEC-offload baseline is validated on the
