@@ -416,14 +416,29 @@ The local `ASK` checkout was reviewed against `origin/mt-6.12.y` as a source of
 bug fixes and maintenance work. Treat it as source material, not as a replacement
 for this OpenWrt integration tree.
 
-The useful follow-up work is:
+Imported fixes from this review and the follow-up security audit:
+
+| Status | Candidate | Area | Delivered as | Validation |
+| --- | --- | --- | --- | --- |
+| Applied | NLKEY receive-path capability and message-length checks | OpenWrt 700-series XFRM patch | OpenWrt revision `r34318-64b2feacfa` | Target kernel builds; flashed router reports `OpenWrt SNAPSHOT r34318-64b2feacfa`. |
+| Applied | PFE cdev short-read guard, ioctl user accessors, and error-path cleanup | OpenWrt 700-series PFE patches | OpenWrt revision `r34318-64b2feacfa` | Target kernel builds; focused `pfe_cdev.o` compile passes. The lab router did not expose a PPFE runtime module or cdev. |
+| Applied | SPI-specific inbound SAGD lookup and XFRM cleanup ref handling | `ask-cdx` | `ask-cdx` source fix, OpenWrt `kmod-ask-cdx` r48 | Package builds cleanly; r48 is installed and `cdx` is loaded on the lab router. |
+| Applied | `kzalloc(..., 0)` to `GFP_KERNEL` | `ask-cdx` | `ask-cdx` source fix, OpenWrt `kmod-ask-cdx` r48 | Package builds cleanly; r48 is installed on the lab router. |
+| Applied | procfs pointer-output cleanup | `ask-cdx` | `ask-cdx` source fix, OpenWrt `kmod-ask-cdx` r48 | Package builds cleanly; installed `cdx.ko` contains `contexta\t%pK` and not the stale raw pointer strings. |
+| Applied | SysV IPC message sizing validation | `ask-cmm` | `ask-cmm` source fix, OpenWrt `ask-cmm` r23 | Package builds cleanly; r23 is installed and CMM is running on the lab router. |
+| Applied | multicast `&` to `&&` cleanup | `ask-cmm` | `ask-cmm` source fix, OpenWrt `ask-cmm` r23 | Package builds cleanly; r23 is installed and CMM is running on the lab router. |
+| Applied | Netlink response validation before payload/error reads | `fci` / `libfci` | `fci` source fix, OpenWrt `libfci` r5 | Package builds cleanly; r5 is installed on the lab router. |
+| Applied | libxml2 compatibility guards | `fmc` package patch | OpenWrt `fmc` r2 patch | Package builds cleanly against `libxml2-16` 2.15.1; r2 is installed and `fmc --help` runs on the lab router. |
+
+The router install checks confirm the fixed packages and binaries are present,
+and follow-up traffic tests passed after flashing this build. Use
+hardware-counter evidence separately when making hardware-offload residency
+claims.
+
+Remaining follow-up work:
 
 | Action | Candidate | Area | Reason |
 | --- | --- | --- | --- |
-| Import now | `kzalloc(..., 0)` to `GFP_KERNEL` | `ask-cdx` | Kernel allocations should use explicit GFP flags. Local CDX still has these call sites. |
-| Import now | procfs pointer-output cleanup | `ask-cdx` | Avoid exposing kernel pointers in user-visible procfs output. |
-| Import now | multicast `&` to `&&` | `ask-cmm` | Fix warning-prone boolean logic in IPv4 and IPv6 multicast command parsing. |
-| Import now | libxml2 compatibility guards | `fmc` package patch | Current OpenWrt uses newer libxml2 headers, so FMC should carry the guarded callback and line-number handling. |
 | Import later as separate patch | CDX FMAN microcode gate | `ask-cdx` plus SDK FMAN wrapper | Runtime check on May 5, 2026 showed FMAN controller code `210.10.1`, so the ASK package check should pass on the lab router. Keep this as a separate safety patch because it changes module-load behavior. |
 | Deeper review | FCI command-buffer API cleanup | `fci` and `ask-cmm` | Replacing legacy `unsigned short *` command buffers with `void *` is likely cleaner, but it crosses the libfci API, CMM call sites, package pins, and hashes. |
 
