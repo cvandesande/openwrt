@@ -27,22 +27,26 @@ program flows, change policy, or make any offload decision by itself.
  		u32		vlan_all;
 --- a/net/bridge/br_input.c
 +++ b/net/bridge/br_input.c
-@@ -66,6 +66,7 @@ static int br_pass_frame_up(struct sk_buff *skb, bool promisc)
+@@ -66,6 +66,9 @@ static int br_pass_frame_up(struct sk_buff *skb, bool promisc)
  	br_multicast_count(br, NULL, skb, br_multicast_igmp_type(skb),
  			   BR_MCAST_DIR_TX);
  
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
 +	skb->layerscape_underlying_iif = indev->ifindex;
++#endif
  	BR_INPUT_SKB_CB(skb)->promisc = promisc;
  
  	return NF_HOOK(NFPROTO_BRIDGE, NF_BR_LOCAL_IN,
 --- a/net/core/dev.c
 +++ b/net/core/dev.c
-@@ -5582,8 +5582,11 @@ static int __netif_receive_skb_core(struct sk_buff **pskb, bool pfmemalloc,
+@@ -5582,8 +5582,13 @@ static int __netif_receive_skb_core(struct sk_buff **pskb, bool pfmemalloc,
  
  	trace_netif_receive_skb(skb);
  
++#if IS_ENABLED(CONFIG_NF_CONNTRACK)
 +	if (!skb->layerscape_underlying_iif)
 +		skb->layerscape_underlying_iif = skb->dev->ifindex;
++#endif
 +
  	orig_dev = skb->dev;
  
