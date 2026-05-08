@@ -107,6 +107,50 @@ Run this every time you want to build the image:
 make -j"$(nproc)"
 ```
 
+To start from a clean OpenWrt build tree and produce both scoped CodeQL SARIF
+files and a complete firmware image, run the scoped CodeQL helper:
+
+```sh
+cd /home/cvandesande/mono-openwrt-project/openwrt
+
+make clean
+make download -j"$(nproc)"
+
+scripts/codeql-openwrt-scoped.sh \
+  --with-kernel-patches \
+  --download-queries \
+  --jobs "$(nproc)"
+
+make -j"$(nproc)" world
+```
+
+The helper uses `~/codeql/codeql` by default. It cleans and traces only the
+Mono-owned ASK integration scope:
+
+- `package/kernel/ask-cdx`
+- `package/kernel/ask-fci`
+- `package/libs/libfci`
+- `package/network/ask-cmm`
+- the ASK kernel interaction patches under
+  `target/linux/layerscape/patches-6.12/720-724`, when
+  `--with-kernel-patches` is used
+
+The SARIF files are written in the OpenWrt tree:
+
+```text
+codeql-results/kernel-ask-patches.full.sarif
+codeql-results/kernel-ask-patches.sarif
+codeql-results/ask-cdx-openwrt.sarif
+codeql-results/ask-fci-openwrt.sarif
+codeql-results/libfci-openwrt.sarif
+codeql-results/ask-cmm-openwrt.sarif
+```
+
+Treat those reports as static analysis for the scoped ASK integration surface,
+not as a whole-OpenWrt or whole-firmware security review. Build success and
+SARIF generation also do not prove hardware offload behavior; runtime hardware
+validation is still required for hardware claims.
+
 That seed is intentionally small. The `mono_gateway-dk` device profile pulls
 the board-support packages for LEDs, thermal/hwmon, SFP, and fan control, and
 the seed adds the hardware acceleration, PPPoE, and LuCI selections needed for
@@ -134,6 +178,8 @@ More detail lives in:
 - [docs/01-platform-and-lab-state.md](docs/01-platform-and-lab-state.md)
 - [docs/02-fast-path-architecture.md](docs/02-fast-path-architecture.md)
 - [docs/03-fman-backend-design.md](docs/03-fman-backend-design.md)
+- [docs/04-developer-tooling.md](docs/04-developer-tooling.md)
+- [docs/codeql-scoped-analysis.md](docs/codeql-scoped-analysis.md)
 - [docs/nightly-next-workflow.md](docs/nightly-next-workflow.md)
 
 Those docs cover:
@@ -146,6 +192,7 @@ Those docs cover:
 - remaining work
 - local `clangd` and `compile_commands.json` developer workflow
   ([docs/04-developer-tooling.md](docs/04-developer-tooling.md))
+- scoped CodeQL SARIF workflow for ASK integration surfaces
 - nightly tracking-branch automation, smoke testing, and manual promotion
 
 SELinux support is included for the Mono Gateway DK image, with policy kept in
