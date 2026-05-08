@@ -16,6 +16,8 @@
 /feeds.conf
 /files
 /compile_commands*.json
+/codeql-db
+/codeql-results
 /target/linux/feeds
 /overlay
 /package/feeds
