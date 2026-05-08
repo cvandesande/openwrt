@@ -13,6 +13,7 @@ CONFIG_TARGET_layerscape=y
 CONFIG_TARGET_layerscape_armv8_64b=y
 CONFIG_TARGET_layerscape_armv8_64b_DEVICE_mono_gateway-dk=y
 
+CONFIG_IMAGEOPT=y
 CONFIG_VERSIONOPT=y
 CONFIG_VERSION_DIST="Mono OpenWrt"
 CONFIG_VERSION_NUMBER="25.12.3-mono1"
