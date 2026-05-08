@@ -29,4 +29,8 @@ Optional developer tooling:
   Local `clangd` and `compile_commands.json` workflow for navigating the
   kernel and ASK package C code.
 
+- [codeql-scoped-analysis.md](codeql-scoped-analysis.md)
+  Scoped CodeQL database and SARIF workflow for ASK package integrations and
+  the optional ASK kernel patch surface.
+
 These docs intentionally describe the current supported design only.
