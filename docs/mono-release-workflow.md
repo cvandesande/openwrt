@@ -40,11 +40,18 @@ The build job verifies:
 - the input is an annotated `mono-ask-*` tag,
 - the checked-out commit matches the tag target,
 - Mono vendor source hashes match the checked-in package hashes,
+- restored cache state is reported in the GitHub step summary,
+- `make toolchain/install` accepts or rebuilds the restored toolchain before
+  the firmware build,
 - `make download` and the full firmware build complete,
 - output filenames use the `mono-openwrt-<version>` prefix,
 - `config.buildinfo`, `profiles.json`, `/etc/openwrt_release`,
   `/usr/lib/os-release`, and `/etc/openwrt_version` report the expected Mono
   release identity.
+
+Build-log artifacts include `make-toolchain-install.log` and
+`ccache-stats.txt` so cache effectiveness can be checked separately from total
+firmware build time.
 
 Do not promote the release from pre-release to full release until the hardware
 smoke-test record confirms boot, management reachability, package/service
