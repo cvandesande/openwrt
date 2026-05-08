@@ -489,6 +489,7 @@ jobs:
       - name: Publish pre-release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           VERSION_NUMBER: ${{ inputs.version_number }}
           VERSION_CODE: ${{ inputs.version_code }}
