@@ -337,10 +337,10 @@ configuration, with a restore prefix for the same epoch. This is safe because
 OpenWrt verifies downloaded source hashes.
 
 `.ccache` uses a stable compatibility family based on runner OS/architecture,
-cache epoch, toolchain tree hash, and generated `.config` hash. The workflow
-restores the current UTC week key first, then falls back to the newest cache in
-that same compatibility family. It saves a refreshed cache only after a
-successful full run, using the current UTC ISO week key.
+cache epoch, the toolchain tree hash, and the filtered toolchain config hash.
+The workflow restores the current UTC week key first, then falls back to the
+newest cache in that same compatibility family. It saves a refreshed cache only
+after a successful full run, using the current UTC ISO week key.
 
 This creates at most one new `.ccache` cache per compatible
 OS/architecture/epoch/toolchain/config family per week. It deliberately does
@@ -349,10 +349,37 @@ immutable, exact hits within the same week are reused but not rewritten; the
 cache evolves on the next week boundary or when the compatibility family
 changes.
 
-`staging_dir/host`, `staging_dir/hostpkg`, and `staging_dir/toolchain-*` use
-tight keys derived from the generated `.config`, relevant OpenWrt source tree
-ids, feed revisions where applicable, runner OS/architecture, and cache epoch.
-They intentionally do not use broad restore prefixes.
+`staging_dir/host` and `staging_dir/hostpkg` still use tight keys derived from
+the generated `.config`, relevant OpenWrt source tree ids, feed revisions where
+applicable, runner OS/architecture, and cache epoch. GitHub cache entries are
+immutable, so these caches stay conservative until telemetry proves that a
+looser key would not repeatedly restore incomplete host-tool state.
+
+`staging_dir/toolchain-*` uses a filtered toolchain key. The source-tree side
+includes OpenWrt make/include/toolchain files plus the target and kernel-header
+inputs that affect the cross toolchain. The config side includes target,
+architecture, CPU, compiler, binutils, libc, kernel-source, and external
+toolchain options, rather than the full generated `.config`.
+
+The workflow does not use broad restore prefixes for `staging_dir/host`,
+`staging_dir/hostpkg`, or `staging_dir/toolchain-*`.
+
+After cache restore and source download, the workflow runs:
+
+```sh
+make -j"$(nproc)" toolchain/install V=s
+```
+
+This gives OpenWrt's own stamp/dependency logic a chance to accept the restored
+toolchain or rebuild the required pieces before the full firmware build. The
+workflow records the elapsed time and the number of `toolchain/*` subdir rebuild
+lines in the GitHub step summary.
+
+The build summary also records exact cache states for `dl/`, `.ccache`,
+`staging_dir/host`, `staging_dir/hostpkg`, and `staging_dir/toolchain-*`.
+Build-log artifacts include `make-toolchain-install.log` and
+`ccache-stats.txt`, so cache effectiveness can be checked without inferring it
+from total job runtime.
 
 Caches can be invalidated by changing the repository variable
 `MONO_NIGHTLY_CACHE_EPOCH`, by passing a `cache_epoch` value during manual
