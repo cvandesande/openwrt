@@ -85,19 +85,27 @@ define Build/mono-mkfs-ext4
 	$(TOPDIR)/target/linux/layerscape/image/gen_ext4_resizable.sh \
 		$@ $(ROOTFS_PARTSIZE) $(CONFIG_TARGET_EXT4_BLOCKSIZE) \
 		$(mkfs_cur_target_dir) \
-		$(if $(CONFIG_TARGET_EXT4_RESERVED_PCT),$(CONFIG_TARGET_EXT4_RESERVED_PCT),0)
+		$(if $(CONFIG_TARGET_EXT4_RESERVED_PCT),$(CONFIG_TARGET_EXT4_RESERVED_PCT),0) \
+		$(if $(CONFIG_TARGET_ROOTFS_SECURITY_LABELS),$(STAGING_DIR_HOST)/bin/setfiles)
 endef
 
 # Add kernel.itb to ext4 rootfs at /boot/kernel.itb
 define Build/mono-add-kernel
 	debugfs -w -R "mkdir boot" $@ 2>/dev/null || true
 	debugfs -w -R "write $(IMAGE_KERNEL) boot/kernel.itb" $@
+	$(if $(CONFIG_TARGET_ROOTFS_SECURITY_LABELS),printf 'sys.id:sys.role:unknown.file\0' > $@.selinux-label)
+	$(if $(CONFIG_TARGET_ROOTFS_SECURITY_LABELS),debugfs -w -R "ea_set -f $@.selinux-label /boot security.selinux" $@)
+	$(if $(CONFIG_TARGET_ROOTFS_SECURITY_LABELS),debugfs -w -R "ea_set -f $@.selinux-label /boot/kernel.itb security.selinux" $@)
+	$(if $(CONFIG_TARGET_ROOTFS_SECURITY_LABELS),rm -f $@.selinux-label)
 endef
 
 # Add FMAN firmware to ext4 rootfs at /boot/fman-ucode.bin for 10G Ethernet (mono_gateway-dk)
 define Build/mono-add-fman
 	debugfs -w -R "mkdir boot" $@ 2>/dev/null || true
 	debugfs -w -R "write $(STAGING_DIR_IMAGE)/fsl_ls1046a-rdb-fman.bin boot/fman-ucode.bin" $@
+	$(if $(CONFIG_TARGET_ROOTFS_SECURITY_LABELS),printf 'sys.id:sys.role:unknown.file\0' > $@.selinux-label)
+	$(if $(CONFIG_TARGET_ROOTFS_SECURITY_LABELS),debugfs -w -R "ea_set -f $@.selinux-label /boot/fman-ucode.bin security.selinux" $@)
+	$(if $(CONFIG_TARGET_ROOTFS_SECURITY_LABELS),rm -f $@.selinux-label)
 endef
 
 include $(SUBTARGET).mk
