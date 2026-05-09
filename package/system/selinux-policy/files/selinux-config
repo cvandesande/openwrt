@@ -1,2 +1,2 @@
-SELINUX=enforcing
+SELINUX=permissive
 SELINUXTYPE=selinux-policy
