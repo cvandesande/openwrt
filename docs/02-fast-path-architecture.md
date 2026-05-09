@@ -272,6 +272,39 @@ separate milestones:
   targeted ports. These should not be pulled in without a specific validated
   need.
 
+### 4RD Compatibility Boundary
+
+4RD support is intentionally disabled in the default Mono ASK CMM build.
+`CONFIG_PACKAGE_ask-cmm_4rd=y` only enables the CMM userspace integration with
+the private NXP ASK 4RD rtnetlink ABI: `RTM_NEW4RD`, `RTM_DEL4RD`, and
+`RTM_GET4RD`. It is not sufficient proof of 4RD support by itself.
+
+Real 4RD validation requires a matching kernel-side implementation, expected to
+be gated by `CONFIG_CPE_4RD_TUNNEL`. That symbol is not part of the current
+validated Mono kernel scope. Enabling only `CONFIG_PACKAGE_ask-cmm_4rd` will
+make CMM issue the private 4RD probe again, but the kernel cannot service it as
+real 4RD support. In that misconfigured state, the SELinux "unrecognized
+netlink message" warning for route-netlink message type `99` can return.
+
+The SELinux route-netlink mapping for the private 4RD messages is also guarded
+behind `CONFIG_CPE_4RD_TUNNEL` or `CONFIG_CPE_4RD_TUNNEL_MODULE`. That keeps the
+default OpenWrt-first kernel unchanged while allowing a future intentional 4RD
+kernel port to label those messages correctly.
+
+If 4RD needs to be tested, use a temporary test seed rather than the normal
+release seed and enable both sides together:
+
+```text
+CONFIG_PACKAGE_ask-cmm_4rd=y
+CONFIG_CPE_4RD_TUNNEL=y
+```
+
+Validation must include boot, basic routing, absence of the SELinux
+`nlmsg_type=99` warning, confirmation that CMM is not taking the disabled 4RD
+path, and an actual 4RD/MAP-style IPv4-over-IPv6 lab peer or equivalent test
+case. A successful build or CMM startup with the package option enabled is only
+an API smoke test, not proof of working 4RD forwarding or hardware offload.
+
 ### Current IPsec SEC Offload
 
 IPsec offload is proven for the current IPv4 tunnel-mode lab scope.
