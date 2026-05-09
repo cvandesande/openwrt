@@ -1,6 +1,6 @@
 #!/bin/bash
 # Creates an ext4 image with resize_inode support and proper GDT reservation
-# Usage: gen_ext4_resizable.sh <output> <size_bytes> <blocksize> <source_dir> [reserved_pct]
+# Usage: gen_ext4_resizable.sh <output> <size_bytes> <blocksize> <source_dir> [reserved_pct] [setfiles]
 # Note: Uses mkfs.ext4 -d (e2fsprogs 1.43+) - no root required
 
 set -e
@@ -10,8 +10,10 @@ SIZE="$2"
 BLOCKSIZE="$3"
 SOURCE_DIR="$4"
 RESERVED_PCT="${5:-0}"
+SETFILES="${6:-}"
 
 TMPFILE="${OUTPUT}.tmp"
+OWNER_CMDS="${OUTPUT}.owner.cmds"
 
 # Calculate actual content size + 50% headroom for filesystem overhead
 CONTENT_SIZE=$(du -sb "$SOURCE_DIR" | cut -f1)
@@ -32,11 +34,51 @@ truncate -s "$INITIAL_SIZE" "$TMPFILE"
 # - resize_inode: enables online resize
 # - resize=32G: reserves GDT blocks for future expansion to 32GB
 # - ^has_journal: no journal (saves ~128MB, OpenWRT doesn't need it for rootfs)
-fakeroot mkfs.ext4 -F -L rootfs -O resize_inode,^has_journal \
+#
+# When SELinux labels are requested, setfiles and mkfs.ext4 must run in the
+# same fakeroot session so mkfs.ext4 can see the fake security.selinux xattrs.
+fakeroot -- sh -c '
+set -e
+source_dir="$1"
+setfiles="$2"
+tmpfile="$3"
+blocksize="$4"
+reserved_pct="$5"
+
+if [ -n "$setfiles" ]; then
+    if [ ! -f "$source_dir/etc/selinux/config" ]; then
+        echo "SELinux labeling requested, but $source_dir/etc/selinux/config is missing" >&2
+        exit 1
+    fi
+
+    . "$source_dir/etc/selinux/config"
+    file_contexts="$source_dir/etc/selinux/${SELINUXTYPE}/contexts/files/file_contexts"
+    if [ ! -f "$file_contexts" ]; then
+        echo "SELinux labeling requested, but $file_contexts is missing" >&2
+        exit 1
+    fi
+
+    "$setfiles" -r "$source_dir" "$file_contexts" "$source_dir"
+fi
+
+mkfs.ext4 -F -L rootfs -O resize_inode,^has_journal \
     -E resize=34359738368 \
-    -b "$BLOCKSIZE" -m "$RESERVED_PCT" \
-    -d "$SOURCE_DIR" \
-    "$TMPFILE"
+    -b "$blocksize" -m "$reserved_pct" \
+    -d "$source_dir" \
+    "$tmpfile"
+' sh "$SOURCE_DIR" "$SETFILES" "$TMPFILE" "$BLOCKSIZE" "$RESERVED_PCT"
+
+# setfiles must run in fakeroot for SELinux xattrs, but that makes mkfs.ext4
+# record the build user's uid/gid. Normalize image ownership afterwards without
+# changing the target rootfs tree on disk.
+find "$SOURCE_DIR" -mindepth 1 -printf '%P\n' | while IFS= read -r path; do
+    escaped="${path//\\/\\\\}"
+    escaped="${escaped//\"/\\\"}"
+    printf 'set_inode_field "/%s" uid 0\n' "$escaped"
+    printf 'set_inode_field "/%s" gid 0\n' "$escaped"
+done > "$OWNER_CMDS"
+debugfs -w -f "$OWNER_CMDS" "$TMPFILE" >/dev/null 2>&1
+rm -f "$OWNER_CMDS"
 
 # Shrink filesystem to minimum
 e2fsck -fy "$TMPFILE" >/dev/null 2>&1 || true
