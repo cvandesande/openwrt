@@ -9,16 +9,16 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ask-cmm
 PKG_VERSION:=17.03.1
-PKG_RELEASE:=23
+PKG_RELEASE:=24
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/cvandesande/ask-cmm.git
 # When PKG_SOURCE_VERSION changes, run this and update PKG_MIRROR_HASH:
 #   scripts/mono-check-vendor-hashes.sh package/network/ask-cmm
-PKG_SOURCE_VERSION:=334043ce2a9a42a3a94fc31bc6018ebd13788e8c
+PKG_SOURCE_VERSION:=257b0a21e31364bfb5c12b8ea52160e17141f110
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
 PKG_SOURCE:=$(PKG_SOURCE_SUBDIR).tar.zst
-PKG_MIRROR_HASH:=40d70e7a6952b537c33de7c028116cd9f6ce38b4dc90a8fffa7f818f01212de3
+PKG_MIRROR_HASH:=db4de6403954c0447fcc14b6ef64b9e7a1239177b859c3a944b4f0f43dab032e
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
 PKG_LICENSE:=GPL-2.0-or-later
@@ -46,6 +46,21 @@ define Package/ask-cmm/description
   Solutions Kit (ASK).
 endef
 
+define Package/ask-cmm/config
+  if PACKAGE_ask-cmm
+
+  config PACKAGE_ask-cmm_4rd
+	bool "Enable NXP ASK 4RD compatibility"
+	default n
+	help
+	  Enable CMM integration with the private NXP ASK 4RD rtnetlink ABI
+	  using RTM_NEW4RD, RTM_DEL4RD, and RTM_GET4RD. Leave disabled unless
+	  the kernel also carries matching CONFIG_CPE_4RD_TUNNEL support and
+	  the deployment needs 4RD/MAP-style IPv4-over-IPv6 offload.
+
+  endif
+endef
+
 # Build only the wired-first Stage 2 surface. WiFi, auto-bridge, and QoS
 # connmark stay deferred; this milestone enables IPsec with the no-flow-cache
 # conntrack XFRM-handle ABI.
@@ -58,6 +73,10 @@ TARGET_CFLAGS += \
 	-DENABLE_EGRESS_QOS \
 	-DENABLE_INGRESS_QOS \
 	-DVLAN_FILTER
+
+ifeq ($(CONFIG_PACKAGE_ask-cmm_4rd),y)
+TARGET_CFLAGS += -DCMM_4RD_SUPPORT
+endif
 
 define Package/ask-cmm/install
 	$(INSTALL_DIR) $(1)/usr/sbin
