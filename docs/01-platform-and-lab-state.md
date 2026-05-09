@@ -65,6 +65,26 @@ router. Follow-up traffic tests passed after flashing this build. Use
 hardware-counter evidence separately when making hardware-offload residency
 claims.
 
+## SELinux Status
+
+SELinux support is included in the normal Mono Gateway DK seed,
+`config/mono_gateway-dk.seed`. That seed enables the SELinux OpenWrt variants,
+audit tooling, and the Mono policy patches currently being iterated on the lab
+router.
+
+The firmware default remains permissive for now. The packaged default is
+`SELINUX=permissive` in `package/system/selinux-policy/files/selinux-config`,
+so new images boot into audit-first policy validation instead of risking a
+harder enforcing-mode recovery problem while policy coverage is still moving.
+
+For enforcing-mode testing, set `/etc/selinux/config` to `SELINUX=enforcing`
+and switch the running system with `setenforce 1` after boot. Preserving
+configuration across a firmware update can preserve that file, but early boot
+may still start permissive because policy is loaded before the saved
+configuration is restored. Until the boot path explicitly reconciles the
+running mode with `/etc/selinux/config` after config restore, confirm with
+`getenforce` after each flash or reboot.
+
 ## IPsec Status
 
 The first IPv4 tunnel-mode IPsec SEC-offload baseline is validated on the
