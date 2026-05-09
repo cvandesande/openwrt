@@ -36,3 +36,11 @@ CONFIG_PACKAGE_strongswan-mod-gcm=y
 CONFIG_PACKAGE_strongswan-mod-kdf=y
 CONFIG_PACKAGE_strongswan-swanctl=y
 CONFIG_PACKAGE_kmod-crypto-gcm=y
+
+# SELinux developer bring-up. Start permissive and use audit output to iterate
+# policy before considering enforcing mode; see
+# package/system/selinux-policy/files/selinux-config.
+CONFIG_SELINUX=y
+CONFIG_SELINUXTYPE_dssp=y
+CONFIG_PACKAGE_auditd=y
+CONFIG_PACKAGE_audit-utils=y

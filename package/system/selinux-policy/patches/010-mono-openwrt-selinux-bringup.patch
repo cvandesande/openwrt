@@ -1,0 +1,284 @@
+From: Mono OpenWrt <mono-openwrt@local>
+Subject: selinux-policy: allow Mono OpenWrt bring-up paths
+
+Cover the first set of SELinux permissive-mode denials seen on the Mono
+Gateway Development Kit without granting broad tmpfs access. In particular,
+label odhcpd's current temporary state paths so rpcd can consume the lease
+file through the existing odhcpd tmp-file policy, label libsensors
+configuration so htop can read temperature data without broad /etc directory
+access, let htop read the sysfs metadata it needs as a process viewer, and let
+ucode transition to the existing iproute2 and wireguard domains instead of
+running those tools in ucode.subj.
+
+--- a/src/agent/sysagent/boarddetectsysagent.cil
++++ b/src/agent/sysagent/boarddetectsysagent.cil
+@@ -9,6 +9,7 @@
+   (call conf.read_file_files (subj))
+ 
+   (call .board.manage_file_files (subj))
++  (call .board.tmp_fs_type_transition_file (subj))
+ 
+   (call .class.list_sysfile_dirs (subj))
+   (call .class.read_sysfile_lnk_files (subj))
+@@ -36,6 +37,8 @@
+ 
+   (call .shell.client.type (subj))
+ 
++  (call .tmp.deletename_fs_dirs (subj))
++
+   (call .stordev.read.type (subj))
+ 
+   (call .sysinfo.tmp.list_file_dirs (subj))
+--- a/src/agent/sysagent/gptfdisksysagent.cil
++++ b/src/agent/sysagent/gptfdisksysagent.cil
+@@ -10,6 +10,9 @@
+   (call .block.list_sysfile_dirs (subj))
+   (call .block.read_sysfile_lnk_files (subj))
+ 
++  (call .dev.search_sysfile_dirs (subj))
++  (call .dev.read_sysfile_lnk_files (subj))
++
+   (call .devices.list_sysfile_dirs (subj))
+   (call .devices.read_sysfile_files (subj))
+   (call .devices.read_sysfile_lnk_files (subj))
+--- /dev/null
++++ b/src/file/conffile/sensorsconffile.cil
+@@ -0,0 +1,26 @@
++;; SPDX-FileCopyrightText: © 2025 Dominick Grift <dominick.grift@defensec.nl>
++;; SPDX-License-Identifier: Unlicense
++
++(in file.unconfined
++
++    (call .sensors.conf.conf_file_type_transition_file (typeattr)))
++
++(block sensors
++
++    (block conf
++
++      (filecon "/etc/sensors3\.conf" file file_context)
++      (filecon "/etc/sensors3\.conf\..*" file file_context)
++
++      (filecon "/etc/sensors\.conf" file file_context)
++      (filecon "/etc/sensors\.conf\..*" file file_context)
++
++      (filecon "/etc/sensors\.d" dir file_context)
++      (filecon "/etc/sensors\.d/.*" any file_context)
++
++      (macro conf_file_type_transition_file ((type ARG1))
++	     (call .conf.file_type_transition (ARG1 file dir "sensors.d"))
++	     (call .conf.file_type_transition (ARG1 file file "sensors.conf"))
++	     (call .conf.file_type_transition (ARG1 file file "sensors3.conf")))
++
++      (blockinherit .file.conf.template)))
+--- a/src/agent/sysagent/htopsysagent.cil
++++ b/src/agent/sysagent/htopsysagent.cil
+@@ -8,6 +8,9 @@
+ 
+   (call conf.read_file_files (subj))
+ 
++  (call .sensors.conf.list_file_dirs (subj))
++  (call .sensors.conf.read_file_files (subj))
++
+   (call home.create_file_dirs (subj))
+   (call home.readwrite_file_dirs (subj))
+   (call home.manage_file_files (subj))
+@@ -28,8 +28,15 @@
+ 
+   (call .kernel.search_sysctlfile_dirs (subj))
+ 
++  (call .bus.list_sysfile_dirs (subj))
++  (call .bus.read_sysfile_lnk_files (subj))
++  (call .class.list_sysfile_dirs (subj))
++  (call .class.read_sysfile_lnk_files (subj))
++  (call .kernel.list_sysfile_dirs (subj))
+   (call .kernel.search_sysfile_dirs (subj))
++  (call .kernel.read_sysfile_files (subj))
+ 
++  (call .sys.getattr_fs (subj))
+   (call .loadavg.read_procfile_files (subj))
+ 
+   (call .locales.client.type (subj))
+--- a/src/agent/sysagent/iproute2sysagent.cil
++++ b/src/agent/sysagent/iproute2sysagent.cil
+@@ -16,8 +16,8 @@
+       (blockinherit .sys.agent.template)
+ 
+       (allow subj self
+-	     (capability (dac_read_search net_admin sys_admin sys_module
+-					  sys_ptrace)))
++	     (capability (dac_read_search net_admin net_bind_service sys_admin
++					  sys_module sys_ptrace)))
+       (allow subj self create_netlink_generic_socket)
+       (allow subj self create_netlink_tcpdiag_socket)
+       (allow subj self create_netlink_xfrm_socket)
+--- a/src/agent/sysagent/odhcpdsysagent.cil
++++ b/src/agent/sysagent/odhcpdsysagent.cil
+@@ -26,7 +26,9 @@
+     (call tmp.manage_file_dirs (subj))
+     (call tmp.manage_file_files (subj))
+     (call tmp.tmp_fs_type_transition_file (subj dir "odhcpd-piofolder"))
++    (call tmp.tmp_fs_type_transition_file (subj dir "odhcpd-piodir"))
+     (call tmp.tmp_fs_type_transition_file (subj file ".odhcpd.leases"))
++    (call tmp.tmp_fs_type_transition_file (subj file ".odhcpd.tmp"))
+     (call tmp.tmp_fs_type_transition_file (subj file "odhcpd.leases"))
+ 
+     (call update.subj_type_transition (subj))
+@@ -103,12 +105,18 @@
+ 
+     (block tmp
+ 
++      (filecon "/tmp/\.odhcpd\.tmp" file file_context)
++      (filecon "/tmp/\.odhcpd\.tmp\..*" file file_context)
++
+       (filecon "/tmp/\.odhcpd\.leases" file file_context)
+       (filecon "/tmp/\.odhcpd\.leases\..*" file file_context)
+ 
+       (filecon "/tmp/odhcpd\.leases" file file_context)
+       (filecon "/tmp/odhcpd\.leases\..*" file file_context)
+ 
++      (filecon "/tmp/odhcpd-piodir" dir file_context)
++      (filecon "/tmp/odhcpd-piodir/.*" any file_context)
++
+       (filecon "/tmp/odhcpd-piofolder" dir file_context)
+       (filecon "/tmp/odhcpd-piofolder/.*" any file_context)
+ 
+@@ -153,8 +161,12 @@
+     (call .odhcp.server.libtmp.libtmp_file_type_transition_file (typeattr))
+     (call .odhcp.server.tmp.tmp_fs_type_transition_file
+ 	  (typeattr dir "odhcpd-piofolder"))
++    (call .odhcp.server.tmp.tmp_fs_type_transition_file
++	  (typeattr dir "odhcpd-piodir"))
+     (call .odhcp.server.tmp.tmp_fs_type_transition_file
+ 	  (typeattr file ".odhcpd.leases"))
++    (call .odhcp.server.tmp.tmp_fs_type_transition_file
++	  (typeattr file ".odhcpd.tmp"))
+     (call .odhcp.server.tmp.tmp_fs_type_transition_file
+ 	  (typeattr file "odhcpd.leases"))
+     (call .odhcp.server.update.exec.exec_file_type_transition_file (typeattr)))
+--- a/src/agent/sysagent/ucodesysagent.cil
++++ b/src/agent/sysagent/ucodesysagent.cil
+@@ -10,104 +10,113 @@
+ 
+   (allow subj self (capability (net_admin sys_module sys_ptrace)))
+   (allow subj self create_netlink_generic_socket)
+ 
+   (call data.list_file_dirs (subj))
+   (call data.read_file_files (subj))
+ 
+   (call runtmp.manage_file_files (subj))
+   (call runtmp.runtmp_file_type_transition_file (subj "*"))
+ 
+   (call exec.execute_file_files (subj))
+ 
+   (call .board.manage_file_files (subj))
+   (call .board.conf_file_type_transition_file (subj))
+ 
+   (call .cgiscript.list_file_dirs (subj))
+ 
+   ;; replaces /etc/board.json with /etc/board.json.new
+   (call .conf.deletename_file_dirs (subj))
+ 
++  (call .firewall.conf.search_file_dirs (subj))
++
+   (call .debug.search_fs_dirs (subj))
+ 
+   ;; writes rps_cpus
+   (call .devices.readwrite_sysfile_files (subj))
+ 
+   (call .firewall.data.list_file_dirs (subj))
+   (call .firewall.data.read_file_files (subj))
+ 
+   (call .firewall.runtmp.manage_file_files (subj))
+   (call .firewall.runtmp.runtmp_file_type_transition_file (subj "fw4.state"))
+ 
+   (call .functions.client.type (subj))
+ 
+   ;; /dev/null
+   (call .hotplug.call.dontaudit_use_subj_fds (subj))
+ 
++  (call .iproute2.ip.subj_type_transition (subj))
++
+   (call .log.server.unix_dgram_send (subj))
+ 
+   (call .netif.data.dontaudit_readinherited_file_files (subj))
+ 
+   (call .nft.subj_type_transition (subj))
+ 
+   (call .odhcp.client.readwriteinherited_subj_fifo_files (subj))
+   (call .odhcp.client.use_subj_fds (subj))
+ 
+   (call .ppp.server.dontaudit_readwriteinherited_subj_netlink_route_sockets
+ 	(subj))
+   (call .ppp.server.readwriteinherited_subj_fifo_files (subj))
+   (call .ppp.server.use_subj_fds (subj))
+ 
++  (call .netif.data.list_file_dirs (subj))
++  (call .netif.data.read_file_files (subj))
++
+   (call .proc.list_fs_dirs (subj))
+ 
+   ;; it is traversing all over /proc
+   (call .procfile.list_all_dirs (subj))
+   (call .procfile.read_all_lnk_files (subj))
+ 
+   (call .runtmp.deletename_file_dirs (subj))
+ 
+   (call .shadow.read.type (subj))
+   (call .shadow.read_file_files (subj))
+ 
+   (call .shell.client.type (subj))
+ 
+   (call .subj.read_all_states (subj))
+ 
+   ;; taskset
+   (call .subj.getsched_all_processes (subj))
+   (call .subj.setsched_all_processes (subj))
+ 
+   ;; kmod="netdev-phy0-ap0"
+   (call .sys.modulerequest_system (subj))
+ 
+   ;; it is traversing all over /sys
+   (call .sysfile.list_all_dirs (subj))
+   (call .sysfile.read_all_lnk_files (subj))
+ 
+   (call .tmp.list_fs_dirs (subj))
+ 
+   (call .ubus.server.unix_stream_connect (subj))
+ 
+   (call .uci.conf.client.type (subj))
+ 
+   (call .version.read_procfile_files (subj))
+ 
++  (call .wireguard.wg.subj_type_transition (subj))
++
+   (call .wpa.data.list_file_dirs (subj))
+   (call .wpa.data.read_file_files (subj))
+ 
+   (call .www.list_file_dirs (subj))
+   (call .www.read_file_lnk_files (subj))
+ 
+   (block data
+ 
+     (filecon "/usr/share/ucode" dir file_context)
+     (filecon "/usr/share/ucode/.*" any file_context)
+ 
+     (macro data_file_type_transition_file ((type ARG1))
+ 	   (call .data.file_type_transition
+ 		 (ARG1 file dir "ucode")))
+ 
+     (macro dontaudit_readinherited_file_files ((type ARG1))
+ 	   (dontaudit ARG1 file readinherited_file))
+ 
+     (blockinherit .file.data.base_template)
+     (blockinherit .file.macro_template_dirs)
+--- a/src/agent/sysagent/wireguardtoolssysagent.cil
++++ b/src/agent/sysagent/wireguardtoolssysagent.cil
+@@ -38,6 +38,9 @@
+ 
+       (call .ucode.data.dontaudit_readinherited_file_files (subj))
+ 
++      (call .ucode.readwriteinherited_subj_fifo_files (subj))
++      (allow subj .ucode.subj (fifo_file (open)))
++
+       (call wireguard.tmp.list_file_dirs (subj))
+       (call wireguard.tmp.readwrite_file_files (subj))))
