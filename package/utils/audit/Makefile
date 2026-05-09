@@ -7,7 +7,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=audit-userspace
 PKG_VERSION:=3.1.5
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/linux-audit/$(PKG_NAME).git
@@ -82,7 +82,7 @@ $(call Package/audit/Default)
   SECTION:=admin
   CATEGORY:=Administration
   TITLE+= (daemon)
-  DEPENDS:= +libaudit +libauparse +audit-utils +libev
+  DEPENDS:= +libaudit +libauparse +audit-utils
 endef
 
 define Package/auditd/description
