@@ -209,7 +209,7 @@ jobs:
             printf 'CONFIG_VERSION_CODE="%s"\n' "$VERSION_CODE"
             printf 'CONFIG_DEVEL=y\n'
             printf 'CONFIG_CCACHE=y\n'
-            printf 'CONFIG_CCACHE_DIR=".ccache"\n'
+            printf 'CONFIG_CCACHE_DIR="%s/.ccache"\n' "$PWD"
             printf 'CONFIG_BUILD_LOG=y\n'
           } >> .config
           make defconfig
@@ -261,7 +261,7 @@ jobs:
           hostpkg_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include package)"
           toolchain_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include toolchain target/linux/generic/kernel-* target/linux/generic/backport-* target/linux/generic/pending-* target/linux/generic/hack-* target/linux/layerscape/Makefile target/linux/layerscape/armv8_64b/target.mk target/linux/layerscape/config-* target/linux/layerscape/armv8_64b/config-* target/linux/layerscape/patches-*)"
           toolchain_config_hash="$(toolchain_config_hash)"
-          ccache_family="${CACHE_PREFIX}-ccache-${CACHE_EPOCH}-${toolchain_tree_hash}-${toolchain_config_hash}"
+          ccache_family="${CACHE_PREFIX}-ccache-${CACHE_EPOCH}-absdir-v1-${toolchain_tree_hash}-${toolchain_config_hash}"
           ccache_week="$(date -u +%G-W%V)"
 
           {
@@ -314,15 +314,21 @@ jobs:
         if: ${{ always() }}
         working-directory: ${{ github.workspace }}/source
         env:
-          DL_CACHE_HIT: ${{ steps.restore-dl.outputs.cache-hit || 'skipped' }}
-          CCACHE_CACHE_HIT: ${{ steps.restore-ccache.outputs.cache-hit || 'skipped' }}
-          HOST_CACHE_HIT: ${{ steps.restore-host.outputs.cache-hit || 'skipped' }}
-          HOSTPKG_CACHE_HIT: ${{ steps.restore-hostpkg.outputs.cache-hit || 'skipped' }}
-          TOOLCHAIN_CACHE_HIT: ${{ steps.restore-toolchain.outputs.cache-hit || 'skipped' }}
+          RESTORE_CACHES: ${{ inputs.cold_build != true }}
+          DL_CACHE_HIT: ${{ steps.restore-dl.outputs.cache-hit }}
+          CCACHE_CACHE_HIT: ${{ steps.restore-ccache.outputs.cache-hit }}
+          HOST_CACHE_HIT: ${{ steps.restore-host.outputs.cache-hit }}
+          HOSTPKG_CACHE_HIT: ${{ steps.restore-hostpkg.outputs.cache-hit }}
+          TOOLCHAIN_CACHE_HIT: ${{ steps.restore-toolchain.outputs.cache-hit }}
         run: |
           set -euo pipefail
 
           cache_state() {
+            if [ "$RESTORE_CACHES" != "true" ]; then
+              printf 'skipped'
+              return
+            fi
+
             case "$1" in
               true) printf 'hit' ;;
               false) printf 'partial' ;;
