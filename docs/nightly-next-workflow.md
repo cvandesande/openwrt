@@ -1,9 +1,11 @@
 # Nightly Next Workflow
 
 The `Nightly Next Branch Build` GitHub Actions workflow keeps automated
-tracking branches current without moving validated/public Mono branches. The
-`*-next` branches represent the most recent successful build of rebased
-validated branches, not merely the most recent successful rebase.
+tracking branches current without moving validated/public Mono branches.
+`main` is a filtered upstream tracking branch: it follows upstream OpenWrt
+source while preserving local exclusions such as workflow files. The `*-next`
+branches represent the most recent successful build of rebased validated
+branches, not merely the most recent successful rebase.
 
 It runs nightly and can also be started manually with `workflow_dispatch`.
 Scheduled workflows are loaded from the repository default branch, so changes
@@ -11,20 +13,22 @@ to this workflow only affect nightly automation after they are present on the
 default branch.
 
 The repository default branch is `mono-ask`, not `main`. That is compatible
-with keeping `main` as a pure fast-forward mirror of upstream OpenWrt: the
+with keeping `main` as an automation-maintained upstream tracking branch: the
 scheduled workflow definition is loaded from `mono-ask`, while the workflow
-updates `main` as data. Workflow changes therefore take effect after they are
-manually promoted onto `mono-ask`.
+updates `main` as data only after the rebased `mono-ask-next` candidate builds
+successfully. Workflow changes therefore take effect after they are manually
+promoted onto `mono-ask`.
 
 ## Branch Policy
 
 The workflow is allowed to update only these branches:
 
+- `main`
 - `mono-oss-next`
 - `mono-ask-next`
 
-It does not update `main`, `mono-oss`, or `mono-ask`, does not create nightly
-tags, and does not promote nightly results into validated branches.
+It does not update `mono-oss` or `mono-ask`, does not create nightly tags, and
+does not promote nightly results into validated branches.
 
 The branch and build sequence is:
 
@@ -37,14 +41,15 @@ The branch and build sequence is:
    `mono-ask` tip, then rebase it onto the local `mono-oss-next` candidate.
 5. Save the prepared candidate refs into a short-lived Git bundle artifact.
 6. Build the local `mono-ask-next` candidate in a separate read-only job.
-7. Push `mono-oss-next` and `mono-ask-next` with `--force-with-lease` only
-   after the `mono-ask-next` build succeeds.
+7. Push `main`, `mono-oss-next`, and `mono-ask-next` atomically with
+   `--force-with-lease` only after the `mono-ask-next` build succeeds.
 
-The workflow's `--force-with-lease` push is intentional for the `*-next`
-branches because rebasing rewrites those tracking branches. The workflow does
-not push `main`, `mono-oss`, or `mono-ask`. Manual promotion of a
-validated result also uses `--force-with-lease`, but only after human smoke
-testing.
+The workflow's `--force-with-lease` push is intentional. `main` is reconstructed
+from upstream OpenWrt plus local path exclusions, and the `*-next` branches are
+rebased tracking branches, so all three automation-managed refs may be
+rewritten. The workflow does not push `mono-oss` or `mono-ask`. Manual
+promotion of a validated result also uses `--force-with-lease`, but only after
+human smoke testing.
 
 Each run starts from the current validated `mono-oss` and `mono-ask` branches.
 It does not use the previous `mono-oss-next` or `mono-ask-next` tips as rebase
@@ -52,21 +57,22 @@ inputs, so unresolved nightly-only drift is discarded on the next run.
 
 ## Conflict Handling
 
-Any failed fast-forward, rebase, build, or publication exits non-zero and fails
+Any failed fetch, rebase, build, or publication exits non-zero and fails
 the workflow using normal GitHub Actions failure semantics. GitHub Actions
 email notifications can therefore be configured through normal repository/user
 notification settings.
 
 For rebase conflicts, the helper script prints conflicted paths and writes a
 failure section to the workflow summary. The workflow does not try to resolve
-conflicts automatically. Rebase failures do not move `mono-oss-next` or
-`mono-ask-next`; only `main` may already have moved if its upstream
-fast-forward succeeded first.
+conflicts automatically. Rebase failures do not move `main`, `mono-oss-next`,
+or `mono-ask-next`. Publication happens only after the build succeeds, and the
+publish push is atomic, so a lease or branch-protection failure leaves all
+three automation-managed branches unchanged.
 
 ## Build
 
-After local rebases succeed, the workflow passes the unpushed candidate refs
-to the build job through a Git bundle artifact. The build job checks out the
+After local rebases succeed, the workflow passes the candidate refs to the
+build job through a Git bundle artifact. The build job checks out the
 candidate `mono-ask-next` commit from that bundle and runs the normal OpenWrt
 build flow:
 
@@ -100,8 +106,9 @@ The default checked package paths are `package/kernel/ask-cdx`,
 `package/kernel/ask-fci`, `package/libs/libfci`, `package/network/ask-cmm`,
 and `package/network/ask-dpa-app`.
 
-If that build succeeds, the workflow publishes both `*-next` branches. If the
-build fails, the `*-next` branches keep their previous remote values.
+If that build succeeds, the workflow publishes `main` and both `*-next`
+branches atomically. If the build fails, those branches keep their previous
+remote values.
 
 Build logs, `.config`, and target output under
 `bin/targets/layerscape/armv8_64b/` are uploaded as workflow artifacts.
@@ -394,10 +401,10 @@ repository write access.
 
 This requires repository Actions workflow permissions to allow read/write
 tokens. If `main` is branch-protected against direct pushes by GitHub Actions,
-the fast-forward push to `main` will fail. If `mono-oss-next` or
-`mono-ask-next` are protected against force pushes, their publication push will
-fail. In those cases, either relax protection for the automation branches or
-switch to an explicit GitHub App/PAT with the required bypass rights.
+or if `main`, `mono-oss-next`, or `mono-ask-next` are protected against
+force pushes, the atomic publication push will fail. In those cases, either
+relax protection for the automation branches or switch to an explicit GitHub
+App/PAT with the required bypass rights.
 
 Manual promotion updates `mono-oss` and `mono-ask` with `--force-with-lease`
 because the validated branches move to rebased, tested commits. If those
