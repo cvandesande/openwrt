@@ -157,11 +157,11 @@ prepare() {
 	summary ""
 	summary "| Branch | Local result SHA | Update policy |"
 	summary "| --- | --- | --- |"
-	summary "| \`${MAIN_BRANCH}\` | \`${main_sha}\` | Constructed from \`${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}\` for this run only; excluded upstream paths restored from \`${exclude_ref}\`; not pushed |"
+	summary "| \`${MAIN_BRANCH}\` | \`${main_sha}\` | Constructed from \`${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}\`; excluded upstream paths restored from \`${exclude_ref}\`; not pushed yet |"
 	summary "| \`${MONO_OSS_NEXT_BRANCH}\` | \`${mono_oss_next_sha}\` | Rebuilt from \`${MONO_OSS_BRANCH}\`, then rebased onto \`${MAIN_BRANCH}\`; not pushed yet |"
 	summary "| \`${MONO_ASK_NEXT_BRANCH}\` | \`${mono_ask_next_sha}\` | Rebuilt from \`${MONO_ASK_BRANCH}\`, then rebased onto \`${MONO_OSS_NEXT_BRANCH}\`; not pushed yet |"
 	summary ""
-	summary "\`${MONO_OSS_NEXT_BRANCH}\` and \`${MONO_ASK_NEXT_BRANCH}\` will only be published after the \`${MONO_ASK_NEXT_BRANCH}\` build succeeds."
+	summary "\`${MAIN_BRANCH}\`, \`${MONO_OSS_NEXT_BRANCH}\`, and \`${MONO_ASK_NEXT_BRANCH}\` will only be published after the \`${MONO_ASK_NEXT_BRANCH}\` build succeeds."
 	summary "Validated branches \`${MONO_OSS_BRANCH}\` and \`${MONO_ASK_BRANCH}\` were not updated."
 }
 
@@ -186,13 +186,16 @@ publish() {
 	main_sha="$(git rev-parse "$MAIN_BRANCH")"
 	mono_oss_next_sha="$(git rev-parse "$MONO_OSS_NEXT_BRANCH")"
 	mono_ask_next_sha="$(git rev-parse "$MONO_ASK_NEXT_BRANCH")"
+	main_lease="$(force_with_lease_arg "$MAIN_BRANCH")"
 	oss_lease="$(force_with_lease_arg "$MONO_OSS_NEXT_BRANCH")"
 	ask_lease="$(force_with_lease_arg "$MONO_ASK_NEXT_BRANCH")"
 
-	git push \
+	git push --atomic \
+		"$main_lease" \
 		"$oss_lease" \
 		"$ask_lease" \
 		"$ORIGIN_REMOTE" \
+		"${main_sha}:refs/heads/${MAIN_BRANCH}" \
 		"${mono_oss_next_sha}:refs/heads/${MONO_OSS_NEXT_BRANCH}" \
 		"${mono_ask_next_sha}:refs/heads/${MONO_ASK_NEXT_BRANCH}"
 
@@ -204,10 +207,11 @@ publish() {
 	summary ""
 	summary "| Branch | Published SHA | Update policy |"
 	summary "| --- | --- | --- |"
-	summary "| \`${MONO_OSS_NEXT_BRANCH}\` | \`${mono_oss_next_sha}\` | Published with force-with-lease after successful \`${MONO_ASK_NEXT_BRANCH}\` build |"
-	summary "| \`${MONO_ASK_NEXT_BRANCH}\` | \`${mono_ask_next_sha}\` | Published with force-with-lease after successful build |"
+	summary "| \`${MAIN_BRANCH}\` | \`${main_sha}\` | Published atomically with force-with-lease after successful \`${MONO_ASK_NEXT_BRANCH}\` build |"
+	summary "| \`${MONO_OSS_NEXT_BRANCH}\` | \`${mono_oss_next_sha}\` | Published atomically with force-with-lease after successful \`${MONO_ASK_NEXT_BRANCH}\` build |"
+	summary "| \`${MONO_ASK_NEXT_BRANCH}\` | \`${mono_ask_next_sha}\` | Published atomically with force-with-lease after successful build |"
 	summary ""
-	summary "\`${MAIN_BRANCH}\` was a local upstream-source base for this run and was not pushed by Actions."
+	summary "Validated branches \`${MONO_OSS_BRANCH}\` and \`${MONO_ASK_BRANCH}\` were not updated."
 }
 
 case "$MODE" in
