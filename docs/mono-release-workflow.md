@@ -90,6 +90,11 @@ the appropriate integration branch, usually `mono-oss` or `mono-ask`, then
 rerun the release cut with the same upstream tag and the intended Mono revision
 if it is still unused.
 
+The preparation script has one narrow built-in resolver for the known
+`v25.12.4` image makefile conflict: it preserves upstream's
+`traverse_ten64_mtd` device block and inserts the Mono Gateway DK device block
+before it. Any other conflict still fails closed.
+
 Build-log artifacts include `make-toolchain-install.log` and
 `ccache-stats.txt` so cache effectiveness can be checked separately from total
 firmware build time.
