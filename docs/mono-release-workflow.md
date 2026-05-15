@@ -75,8 +75,8 @@ The candidate preparation and build jobs verify:
   branch,
 - Mono vendor source hashes match the checked-in package hashes,
 - restored cache state is reported in the GitHub step summary,
-- `make toolchain/install` accepts or rebuilds the restored toolchain before
-  the firmware build,
+- `make toolchain/install` builds or installs the required toolchain before the
+  firmware build,
 - `make download` and the full firmware build complete,
 - output filenames use the `mono-openwrt-<version>` prefix,
 - `config.buildinfo`, `profiles.json`, `/etc/openwrt_release`,
@@ -97,7 +97,9 @@ before it. Any other conflict still fails closed.
 
 Build-log artifacts include `make-toolchain-install.log` and
 `ccache-stats.txt` so cache effectiveness can be checked separately from total
-firmware build time.
+firmware build time. The `staging_dir/toolchain-*` cache is intentionally
+disabled because release-candidate telemetry showed that an Actions cache hit
+could still spend tens of minutes in `make toolchain/install`.
 
 Do not promote the release from pre-release to full release until the hardware
 smoke-test record confirms boot, management reachability, package/service

@@ -326,7 +326,6 @@ jobs:
             printf 'ccache_restore_family=%s-week-\n' "$ccache_family"
             printf 'host_key=%s-host-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$host_tree_hash" "$config_hash"
             printf 'hostpkg_key=%s-hostpkg-%s-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$hostpkg_tree_hash" "$feed_hash" "$config_hash"
-            printf 'toolchain_key=%s-toolchain-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$toolchain_tree_hash" "$toolchain_config_hash"
             printf 'toolchain_tree_hash=%s\n' "$toolchain_tree_hash"
             printf 'toolchain_config_hash=%s\n' "$toolchain_config_hash"
           } >> "$GITHUB_OUTPUT"
@@ -357,14 +356,6 @@ jobs:
           path: source/staging_dir/hostpkg
           key: ${{ steps.cache-keys.outputs.hostpkg_key }}
 
-      - name: Restore staging_dir/toolchain cache
-        id: restore-toolchain
-        if: ${{ inputs.cold_build != true }}
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: source/staging_dir/toolchain-*
-          key: ${{ steps.cache-keys.outputs.toolchain_key }}
-
       - name: Report cache restore state
         id: cache-state
         if: ${{ always() }}
@@ -375,7 +366,6 @@ jobs:
           CCACHE_CACHE_HIT: ${{ steps.restore-ccache.outputs.cache-hit }}
           HOST_CACHE_HIT: ${{ steps.restore-host.outputs.cache-hit }}
           HOSTPKG_CACHE_HIT: ${{ steps.restore-hostpkg.outputs.cache-hit }}
-          TOOLCHAIN_CACHE_HIT: ${{ steps.restore-toolchain.outputs.cache-hit }}
         run: |
           set -euo pipefail
 
@@ -398,7 +388,7 @@ jobs:
           ccache_state="$(cache_state "$CCACHE_CACHE_HIT")"
           host_state="$(cache_state "$HOST_CACHE_HIT")"
           hostpkg_state="$(cache_state "$HOSTPKG_CACHE_HIT")"
-          toolchain_state="$(cache_state "$TOOLCHAIN_CACHE_HIT")"
+          toolchain_state="disabled"
 
           {
             printf 'dl_state=%s\n' "$dl_state"
@@ -426,7 +416,7 @@ jobs:
             echo "Restored directory sizes:"
             echo
             echo '```text'
-            du -sh dl .ccache staging_dir/host staging_dir/hostpkg staging_dir/toolchain-* 2>/dev/null || true
+            du -sh dl .ccache staging_dir/host staging_dir/hostpkg 2>/dev/null || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -450,11 +440,9 @@ jobs:
           path: source/dl
           key: ${{ steps.restore-dl.outputs.cache-primary-key }}
 
-      - name: Validate restored toolchain
+      - name: Build/install toolchain
         id: validate-toolchain
         working-directory: ${{ github.workspace }}/source
-        env:
-          TOOLCHAIN_CACHE_HIT: ${{ steps.restore-toolchain.outputs.cache-hit || 'skipped' }}
         run: |
           set -euo pipefail
 
@@ -470,10 +458,7 @@ jobs:
             printf 'rebuild_count=%s\n' "$rebuild_count"
           } >> "$GITHUB_OUTPUT"
 
-          printf 'Toolchain validation took %ss and reported %s toolchain subdir rebuild(s).\n' "$elapsed" "$rebuild_count"
-          if [ "$TOOLCHAIN_CACHE_HIT" = true ] && [ "$rebuild_count" != 0 ]; then
-            printf '::warning::Exact toolchain cache hit still rebuilt %s toolchain subdir(s); the key may be too loose or the cached payload may be incomplete.\n' "$rebuild_count"
-          fi
+          printf 'Toolchain install took %ss and reported %s toolchain subdir rebuild(s).\n' "$elapsed" "$rebuild_count"
 
       - name: Build firmware
         id: build
@@ -507,13 +492,6 @@ jobs:
         with:
           path: source/staging_dir/hostpkg
           key: ${{ steps.cache-keys.outputs.hostpkg_key }}
-
-      - name: Save staging_dir/toolchain cache
-        if: ${{ success() && inputs.cold_build != true && steps.restore-toolchain.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: source/staging_dir/toolchain-*
-          key: ${{ steps.cache-keys.outputs.toolchain_key }}
 
       - name: Verify release artifacts
         id: verify-artifacts
@@ -638,7 +616,7 @@ jobs:
             echo "| staging_dir/host | \`${{ steps.cache-state.outputs.host_state }}\` |"
             echo "| staging_dir/hostpkg | \`${{ steps.cache-state.outputs.hostpkg_state }}\` |"
             echo "| staging_dir/toolchain-* | \`${{ steps.cache-state.outputs.toolchain_state }}\` |"
-            echo "| toolchain validation | \`${{ steps.validate-toolchain.outputs.elapsed_seconds }}s, ${{ steps.validate-toolchain.outputs.rebuild_count }} rebuilds\` |"
+            echo "| toolchain install | \`${{ steps.validate-toolchain.outputs.elapsed_seconds }}s, ${{ steps.validate-toolchain.outputs.rebuild_count }} rebuilds\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish-prerelease:
