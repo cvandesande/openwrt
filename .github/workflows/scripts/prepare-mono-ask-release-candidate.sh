@@ -90,11 +90,96 @@ fail_rebase() {
 	exit 1
 }
 
+resolve_mono_gateway_image_conflict() {
+	local branch="$1"
+	local path="target/linux/layerscape/image/armv8_64b.mk"
+	local conflicted
+	local tmpdir
+	local ours_file
+	local theirs_file
+	local block_file
+
+	conflicted="$(git diff --name-only --diff-filter=U)"
+	if [ "$conflicted" != "$path" ]; then
+		return 1
+	fi
+
+	tmpdir="$(mktemp -d)"
+	ours_file="${tmpdir}/ours"
+	theirs_file="${tmpdir}/theirs"
+	block_file="${tmpdir}/mono-gateway-block"
+
+	if ! git show ":2:${path}" > "$ours_file" || ! git show ":3:${path}" > "$theirs_file"; then
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	if grep -Fxq "define Device/mono_gateway-dk" "$ours_file"; then
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	if ! grep -Fxq "define Device/traverse_ten64_mtd" "$ours_file"; then
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	sed -n '/^define Device\/mono_gateway-dk$/,/^TARGET_DEVICES += mono_gateway-dk$/p' "$theirs_file" > "$block_file"
+	if ! grep -Fxq "define Device/mono_gateway-dk" "$block_file" ||
+		! grep -Fxq "TARGET_DEVICES += mono_gateway-dk" "$block_file"; then
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	if ! awk -v block_file="$block_file" '
+		BEGIN {
+			inserted = 0
+			block_count = 0
+			while ((getline line < block_file) > 0) {
+				block[++block_count] = line
+			}
+			close(block_file)
+			if (block_count == 0) {
+				exit 2
+			}
+		}
+		/^define Device\/traverse_ten64_mtd$/ && inserted == 0 {
+			for (i = 1; i <= block_count; i++) {
+				print block[i]
+			}
+			print ""
+			inserted = 1
+		}
+		{ print }
+		END {
+			if (inserted == 0) {
+				exit 1
+			}
+		}
+	' "$ours_file" > "$path"; then
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	rm -rf "$tmpdir"
+
+	grep -Fxq "TARGET_DEVICES += mono_gateway-dk" "$path"
+	grep -Fxq "TARGET_DEVICES += traverse_ten64_mtd" "$path"
+	git add "$path"
+
+	summary "Resolved known Mono Gateway DK image conflict while updating \`${branch}\`."
+	GIT_EDITOR=true git rebase --continue
+}
+
 run_rebase() {
 	local branch="$1"
 	shift
 
 	if ! git rebase "$@"; then
+		if resolve_mono_gateway_image_conflict "$branch"; then
+			return
+		fi
+
 		fail_rebase "$branch" "Rebase conflict while updating ${branch}."
 	fi
 }
