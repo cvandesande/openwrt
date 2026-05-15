@@ -337,7 +337,6 @@ It uses separate caches for:
 - `.ccache`
 - `staging_dir/host`
 - `staging_dir/hostpkg`
-- `staging_dir/toolchain-*`
 
 `dl/` uses a loose key based on runner OS/architecture, cache epoch, and feed
 configuration, with a restore prefix for the same epoch. This is safe because
@@ -362,14 +361,13 @@ applicable, runner OS/architecture, and cache epoch. GitHub cache entries are
 immutable, so these caches stay conservative until telemetry proves that a
 looser key would not repeatedly restore incomplete host-tool state.
 
-`staging_dir/toolchain-*` uses a filtered toolchain key. The source-tree side
-includes OpenWrt make/include/toolchain files plus the target and kernel-header
-inputs that affect the cross toolchain. The config side includes target,
-architecture, CPU, compiler, binutils, libc, kernel-source, and external
-toolchain options, rather than the full generated `.config`.
+`staging_dir/toolchain-*` caching is disabled. Telemetry from release-candidate
+runs showed that an Actions cache hit could still spend tens of minutes in
+`make toolchain/install`, so the cache was not effective enough to justify the
+download/upload cost or the misleading hit label.
 
 The workflow does not use broad restore prefixes for `staging_dir/host`,
-`staging_dir/hostpkg`, or `staging_dir/toolchain-*`.
+or `staging_dir/hostpkg`.
 
 After cache restore and source download, the workflow runs:
 
@@ -377,16 +375,15 @@ After cache restore and source download, the workflow runs:
 make -j"$(nproc)" toolchain/install V=s
 ```
 
-This gives OpenWrt's own stamp/dependency logic a chance to accept the restored
-toolchain or rebuild the required pieces before the full firmware build. The
-workflow records the elapsed time and the number of `toolchain/*` subdir rebuild
-lines in the GitHub step summary.
+This lets OpenWrt build or install the required toolchain before the full
+firmware build. The workflow records the elapsed time and the number of
+`toolchain/*` subdir rebuild lines in the GitHub step summary.
 
 The build summary also records exact cache states for `dl/`, `.ccache`,
-`staging_dir/host`, `staging_dir/hostpkg`, and `staging_dir/toolchain-*`.
-Build-log artifacts include `make-toolchain-install.log` and
-`ccache-stats.txt`, so cache effectiveness can be checked without inferring it
-from total job runtime.
+`staging_dir/host`, and `staging_dir/hostpkg`; `staging_dir/toolchain-*` is
+reported as disabled. Build-log artifacts include `make-toolchain-install.log`
+and `ccache-stats.txt`, so cache effectiveness can be checked without
+inferring it from total job runtime.
 
 Caches can be invalidated by changing the repository variable
 `MONO_NIGHTLY_CACHE_EPOCH`, by passing a `cache_epoch` value during manual
