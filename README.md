@@ -29,6 +29,11 @@ An advanced user may require additional or specific package. (Toolchain, SDK, ..
 
 * [OpenWrt Wiki Download](https://openwrt.org/downloads)
 
+SELinux support is included for the Mono Gateway DK image, with policy kept in
+the OpenWrt package layer and shaped by observed access rather than broad
+allowances. Images default to permissive mode during policy validation, with
+enforcing-mode testing available.
+
 ## Development
 
 To build your own firmware you need a GNU/Linux, BSD or macOS system (case
