@@ -41,6 +41,11 @@ program eligible traffic into hardware offload. Traffic that cannot use
 hardware offload stays on the normal Linux path. The goal is to make the port
 easier to update as OpenWrt and Linux change.
 
+SELinux support is included for the Mono Gateway DK image, with policy kept in
+the OpenWrt package layer and shaped by observed access rather than broad
+allowances. Images default to permissive mode during policy validation, with
+enforcing-mode testing available.
+
 The result is meant to feel like OpenWrt first: normal build commands, normal
 packages, normal services, and native sysupgrade, with the Mono Gateway
 hardware offload added where it is needed.
