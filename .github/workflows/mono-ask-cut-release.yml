@@ -139,7 +139,11 @@ jobs:
       VERSION_CODE: ${{ needs.prepare-candidate.outputs.version_code }}
       UPSTREAM_TAG: ${{ needs.prepare-candidate.outputs.upstream_tag }}
       UPSTREAM_SHA: ${{ needs.prepare-candidate.outputs.upstream_sha }}
+      BASE_BRANCH: ${{ needs.prepare-candidate.outputs.base_branch }}
+      OSS_BRANCH: ${{ needs.prepare-candidate.outputs.oss_branch }}
       ASK_BRANCH: ${{ needs.prepare-candidate.outputs.ask_branch }}
+      BASE_SHA: ${{ needs.prepare-candidate.outputs.base_sha }}
+      OSS_SHA: ${{ needs.prepare-candidate.outputs.oss_sha }}
       ASK_SHA: ${{ needs.prepare-candidate.outputs.ask_sha }}
       CCACHE_DIR: ${{ github.workspace }}/source/.ccache
     steps:
@@ -546,23 +550,7 @@ jobs:
             "${target_dir}/version.buildinfo" \
             /tmp/release-payload/
 
-          {
-            printf '# Mono OpenWrt %s %s\n\n' "$VERSION_NUMBER" "$RELEASE_TAG"
-            printf 'This is a Mono OpenWrt pre-release for controlled smoke testing.\n\n'
-            printf '## Source\n\n'
-            printf -- '- Tag: `%s`\n' "$RELEASE_TAG"
-            printf -- '- Commit: `%s`\n' "${{ steps.verify-candidate.outputs.candidate_sha }}"
-            printf -- '- Upstream base: OpenWrt `%s` (`%s`)\n' "$UPSTREAM_TAG" "$UPSTREAM_SHA"
-            printf -- '- Image version: `%s`\n' "$VERSION_NUMBER"
-            printf -- '- Image code: `%s`\n\n' "$VERSION_CODE"
-            printf '## CI Validation\n\n'
-            printf -- '- Mono vendor source hash preflight passed.\n'
-            printf -- '- `make download -j$(nproc)` passed.\n'
-            printf -- '- `make -j$(nproc)` passed.\n'
-            printf -- '- Rootfs release metadata matches `Mono OpenWrt %s %s`.\n\n' "$VERSION_NUMBER" "$VERSION_CODE"
-            printf '## Hardware Validation\n\n'
-            printf 'Hardware smoke validation is pending. Do not promote this pre-release to a full release until the Mono Gateway DK smoke-test record passes.\n'
-          } > /tmp/release-payload/RELEASE_NOTES.md
+          bash .github/workflows/scripts/generate-mono-ask-release-notes.sh /tmp/release-payload/RELEASE_NOTES.md
 
           {
             printf 'image_prefix=%s\n' "$image_prefix"
