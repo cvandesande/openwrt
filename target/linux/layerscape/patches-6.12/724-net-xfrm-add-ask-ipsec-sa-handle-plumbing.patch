@@ -1484,13 +1484,13 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  		x->pcpu_num = UINT_MAX;
  		spin_lock_init(&x->lock);
  	}
-@@ -766,6 +834,12 @@
+@@ -767,6 +835,12 @@
  
- 		if (x->id.spi)
- 			hlist_del_rcu(&x->byspi);
+ 		if (!hlist_unhashed(&x->byspi))
+ 			hlist_del_init_rcu(&x->byspi);
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
-+		if (x->handle && x->in_byh_hash) {
-+			hlist_del_rcu(&x->byh);
++		if (!hlist_unhashed(&x->byh)) {
++			hlist_del_init_rcu(&x->byh);
 +			x->in_byh_hash = 0;
 +		}
 +#endif
