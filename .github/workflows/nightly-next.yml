@@ -169,8 +169,6 @@ jobs:
         run: |
           cp config/mono_gateway-dk.seed .config
           {
-            printf 'CONFIG_DEVEL=y\n'
-            printf 'CONFIG_CCACHE=y\n'
             printf 'CONFIG_CCACHE_DIR="%s/.ccache"\n' "$PWD"
             printf 'CONFIG_BUILD_LOG=y\n'
           } >> .config
