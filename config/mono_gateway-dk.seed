@@ -13,6 +13,10 @@ CONFIG_TARGET_layerscape=y
 CONFIG_TARGET_layerscape_armv8_64b=y
 CONFIG_TARGET_layerscape_armv8_64b_DEVICE_mono_gateway-dk=y
 
+# Developer build options used by local and nightly rebuilds.
+CONFIG_DEVEL=y
+CONFIG_CCACHE=y
+
 CONFIG_PACKAGE_ask-cmm=y
 CONFIG_PACKAGE_ask-dpa-app=y
 CONFIG_PACKAGE_kmod-ask-fci=y
