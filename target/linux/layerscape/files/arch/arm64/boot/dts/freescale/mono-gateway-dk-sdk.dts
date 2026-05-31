@@ -271,14 +271,14 @@
 
 	ethernet@f0000 {
 		/delete-property/ fixed-link;
-		phy-connection-type = "10gbase-r";
-		managed = "in-band-status";
+		phy-connection-type = "xgmii";
+			fixed-link = <0 1 10000 0 0>;
 	};
 
 	ethernet@f2000 {
 		/delete-property/ fixed-link;
-		phy-connection-type = "10gbase-r";
-		managed = "in-band-status";
+		phy-connection-type = "xgmii";
+			fixed-link = <0 1 10000 0 0>;
 	};
 
 	/* DPA offline-port bindings consumed by ask-dpa-app/CDX. */
