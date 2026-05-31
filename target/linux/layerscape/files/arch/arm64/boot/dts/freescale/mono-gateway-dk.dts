@@ -487,15 +487,15 @@
 
 	fm1_mac9: ethernet@f0000 { /* 10GEC1 */
 		sfp = <&sfp_xfi0>;
-		phy-connection-type = "10gbase-r";
-		managed = "in-band-status";
+		phy-connection-type = "xgmii";
+			fixed-link = <0 1 10000 0 0>;
 		pcs-handle-names = "xfi";
 	};
 
  fm1_mac10: ethernet@f2000 { /* 10GEC2 */
 		sfp = <&sfp_xfi1>;
-		phy-connection-type = "10gbase-r";
-		managed = "in-band-status";
+		phy-connection-type = "xgmii";
+			fixed-link = <0 1 10000 0 0>;
 		pcs-handle-names = "xfi";
 	};
 	
