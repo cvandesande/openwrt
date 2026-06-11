@@ -78,6 +78,65 @@ run_rebase() {
 	fi
 }
 
+run_rebase_keep_theirs_for_paths() {
+	local branch="$1"
+	shift
+	local paths=()
+
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		--)
+			shift
+			break
+			;;
+		*)
+			paths+=("$1")
+			shift
+			;;
+		esac
+	done
+
+	if git rebase "$@"; then
+		return
+	fi
+
+	local conflicts path allowed=false
+	conflicts="$(git diff --name-only --diff-filter=U)"
+	if [ -n "$conflicts" ]; then
+		allowed=true
+		while IFS= read -r path; do
+			local match=false
+			local allowed_path
+			for allowed_path in "${paths[@]}"; do
+				if [ "$path" = "$allowed_path" ]; then
+					match=true
+					break
+				fi
+			done
+			if [ "$match" != true ]; then
+				allowed=false
+				break
+			fi
+		done <<< "$conflicts"
+	fi
+
+	if [ "$allowed" != true ]; then
+		fail_rebase "$branch" "Rebase conflict while updating ${branch}."
+	fi
+
+	printf '::notice::Keeping rebased %s version for allowed conflict path(s): %s\n' "$branch" "$(printf '%s' "$conflicts" | tr '\n' ' ')" >&2
+	for path in "${paths[@]}"; do
+		if git diff --name-only --diff-filter=U -- "$path" | grep -qxF "$path"; then
+			git checkout --theirs -- "$path"
+			git add -- "$path"
+		fi
+	done
+
+	if ! GIT_EDITOR=true git rebase --continue; then
+		fail_rebase "$branch" "Rebase conflict while updating ${branch}."
+	fi
+}
+
 restore_paths_from_ref() {
 	local ref="$1"
 	local path
@@ -147,7 +206,7 @@ prepare() {
 	mono_oss_next_sha="$(git rev-parse HEAD)"
 
 	git switch --force-create "$MONO_ASK_NEXT_BRANCH" "$(remote_ref "$MONO_ASK_BRANCH")"
-	run_rebase "$MONO_ASK_NEXT_BRANCH" --onto "$MONO_OSS_NEXT_BRANCH" "$(remote_ref "$MONO_OSS_BRANCH")"
+	run_rebase_keep_theirs_for_paths "$MONO_ASK_NEXT_BRANCH" README.md -- --onto "$MONO_OSS_NEXT_BRANCH" "$(remote_ref "$MONO_OSS_BRANCH")"
 	mono_ask_next_sha="$(git rev-parse HEAD)"
 
 	set_output mono_oss_next_sha "$mono_oss_next_sha"
