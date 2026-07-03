@@ -8,10 +8,8 @@ UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
 MAIN_BRANCH="${MAIN_BRANCH:-main}"
 MONO_OSS_BRANCH="${MONO_OSS_BRANCH:-mono-oss}"
 MONO_ASK_BRANCH="${MONO_ASK_BRANCH:-mono-ask}"
-MONO_OSS_NEXT_BRANCH="${MONO_OSS_NEXT_BRANCH:-mono-oss-next}"
-MONO_ASK_NEXT_BRANCH="${MONO_ASK_NEXT_BRANCH:-mono-ask-next}"
 UPSTREAM_EXCLUDE_PATHS="${UPSTREAM_EXCLUDE_PATHS:-.github/workflows .github/llm-review-rules.md}"
-MODE="${1:-${NIGHTLY_NEXT_MODE:-prepare}}"
+MODE="${1:-${NIGHTLY_BUILD_MODE:-prepare}}"
 
 summary() {
 	if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
@@ -201,53 +199,56 @@ prepare() {
 	main_sha="$(git rev-parse HEAD)"
 	set_output main_sha "$main_sha"
 
-	git switch --force-create "$MONO_OSS_NEXT_BRANCH" "$(remote_ref "$MONO_OSS_BRANCH")"
-	run_rebase "$MONO_OSS_NEXT_BRANCH" "$MAIN_BRANCH"
-	mono_oss_next_sha="$(git rev-parse HEAD)"
+	git switch --force-create "$MONO_OSS_BRANCH" "$(remote_ref "$MONO_OSS_BRANCH")"
+	run_rebase "$MONO_OSS_BRANCH" "$MAIN_BRANCH"
+	mono_oss_sha="$(git rev-parse HEAD)"
 
-	git switch --force-create "$MONO_ASK_NEXT_BRANCH" "$(remote_ref "$MONO_ASK_BRANCH")"
-	run_rebase_keep_theirs_for_paths "$MONO_ASK_NEXT_BRANCH" README.md -- --onto "$MONO_OSS_NEXT_BRANCH" "$(remote_ref "$MONO_OSS_BRANCH")"
-	mono_ask_next_sha="$(git rev-parse HEAD)"
+	git switch --force-create "$MONO_ASK_BRANCH" "$(remote_ref "$MONO_ASK_BRANCH")"
+	run_rebase_keep_theirs_for_paths "$MONO_ASK_BRANCH" README.md -- --onto "$MONO_OSS_BRANCH" "$(remote_ref "$MONO_OSS_BRANCH")"
+	mono_ask_sha="$(git rev-parse HEAD)"
 
-	set_output mono_oss_next_sha "$mono_oss_next_sha"
-	set_output mono_ask_next_sha "$mono_ask_next_sha"
+	set_output mono_oss_sha "$mono_oss_sha"
+	set_output mono_ask_sha "$mono_ask_sha"
 
 	summary "### Branch preparation"
 	summary ""
 	summary "| Branch | Local result SHA | Update policy |"
 	summary "| --- | --- | --- |"
 	summary "| \`${MAIN_BRANCH}\` | \`${main_sha}\` | Constructed from \`${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}\`; excluded upstream paths restored from \`${exclude_ref}\`; not pushed yet |"
-	summary "| \`${MONO_OSS_NEXT_BRANCH}\` | \`${mono_oss_next_sha}\` | Rebuilt from \`${MONO_OSS_BRANCH}\`, then rebased onto \`${MAIN_BRANCH}\`; not pushed yet |"
-	summary "| \`${MONO_ASK_NEXT_BRANCH}\` | \`${mono_ask_next_sha}\` | Rebuilt from \`${MONO_ASK_BRANCH}\`, then rebased onto \`${MONO_OSS_NEXT_BRANCH}\`; not pushed yet |"
+	summary "| \`${MONO_OSS_BRANCH}\` | \`${mono_oss_sha}\` | Rebuilt from current \`${MONO_OSS_BRANCH}\`, then rebased onto \`${MAIN_BRANCH}\`; not pushed yet |"
+	summary "| \`${MONO_ASK_BRANCH}\` | \`${mono_ask_sha}\` | Rebuilt from current \`${MONO_ASK_BRANCH}\`, then rebased onto the rebuilt \`${MONO_OSS_BRANCH}\`; not pushed yet |"
 	summary ""
-	summary "\`${MAIN_BRANCH}\`, \`${MONO_OSS_NEXT_BRANCH}\`, and \`${MONO_ASK_NEXT_BRANCH}\` will only be published after the \`${MONO_ASK_NEXT_BRANCH}\` build succeeds."
-	summary "Validated branches \`${MONO_OSS_BRANCH}\` and \`${MONO_ASK_BRANCH}\` were not updated."
+	summary "All three branches publish atomically, only after the \`${MONO_ASK_BRANCH}\` build succeeds."
+	summary "These branches are compile/build-validated only by this workflow. Hardware"
+	summary "validation happens exclusively through the release pipeline"
+	summary "(\`Cut Mono ASK Release Candidate\` / \`Cut Mono ASK Snapshot Release\`, followed by"
+	summary "manual smoke testing before promoting a GitHub pre-release)."
 }
 
 publish() {
 	if ! git show-ref --verify --quiet "refs/heads/${MAIN_BRANCH}" ||
-		! git show-ref --verify --quiet "refs/heads/${MONO_OSS_NEXT_BRANCH}" ||
-		! git show-ref --verify --quiet "refs/heads/${MONO_ASK_NEXT_BRANCH}"; then
+		! git show-ref --verify --quiet "refs/heads/${MONO_OSS_BRANCH}" ||
+		! git show-ref --verify --quiet "refs/heads/${MONO_ASK_BRANCH}"; then
 		printf '::error::Prepared local branches are missing; run prepare before publish\n' >&2
 		exit 1
 	fi
 
-	if ! git merge-base --is-ancestor "$MAIN_BRANCH" "$MONO_OSS_NEXT_BRANCH"; then
-		printf '::error::%s is not based on %s\n' "$MONO_OSS_NEXT_BRANCH" "$MAIN_BRANCH" >&2
+	if ! git merge-base --is-ancestor "$MAIN_BRANCH" "$MONO_OSS_BRANCH"; then
+		printf '::error::%s is not based on %s\n' "$MONO_OSS_BRANCH" "$MAIN_BRANCH" >&2
 		exit 1
 	fi
 
-	if ! git merge-base --is-ancestor "$MONO_OSS_NEXT_BRANCH" "$MONO_ASK_NEXT_BRANCH"; then
-		printf '::error::%s is not based on %s\n' "$MONO_ASK_NEXT_BRANCH" "$MONO_OSS_NEXT_BRANCH" >&2
+	if ! git merge-base --is-ancestor "$MONO_OSS_BRANCH" "$MONO_ASK_BRANCH"; then
+		printf '::error::%s is not based on %s\n' "$MONO_ASK_BRANCH" "$MONO_OSS_BRANCH" >&2
 		exit 1
 	fi
 
 	main_sha="$(git rev-parse "$MAIN_BRANCH")"
-	mono_oss_next_sha="$(git rev-parse "$MONO_OSS_NEXT_BRANCH")"
-	mono_ask_next_sha="$(git rev-parse "$MONO_ASK_NEXT_BRANCH")"
+	mono_oss_sha="$(git rev-parse "$MONO_OSS_BRANCH")"
+	mono_ask_sha="$(git rev-parse "$MONO_ASK_BRANCH")"
 	main_lease="$(force_with_lease_arg "$MAIN_BRANCH")"
-	oss_lease="$(force_with_lease_arg "$MONO_OSS_NEXT_BRANCH")"
-	ask_lease="$(force_with_lease_arg "$MONO_ASK_NEXT_BRANCH")"
+	oss_lease="$(force_with_lease_arg "$MONO_OSS_BRANCH")"
+	ask_lease="$(force_with_lease_arg "$MONO_ASK_BRANCH")"
 
 	git push --atomic \
 		"$main_lease" \
@@ -255,22 +256,23 @@ publish() {
 		"$ask_lease" \
 		"$ORIGIN_REMOTE" \
 		"${main_sha}:refs/heads/${MAIN_BRANCH}" \
-		"${mono_oss_next_sha}:refs/heads/${MONO_OSS_NEXT_BRANCH}" \
-		"${mono_ask_next_sha}:refs/heads/${MONO_ASK_NEXT_BRANCH}"
+		"${mono_oss_sha}:refs/heads/${MONO_OSS_BRANCH}" \
+		"${mono_ask_sha}:refs/heads/${MONO_ASK_BRANCH}"
 
 	set_output main_sha "$main_sha"
-	set_output mono_oss_next_sha "$mono_oss_next_sha"
-	set_output mono_ask_next_sha "$mono_ask_next_sha"
+	set_output mono_oss_sha "$mono_oss_sha"
+	set_output mono_ask_sha "$mono_ask_sha"
 
 	summary "### Branch publication"
 	summary ""
 	summary "| Branch | Published SHA | Update policy |"
 	summary "| --- | --- | --- |"
-	summary "| \`${MAIN_BRANCH}\` | \`${main_sha}\` | Published atomically with force-with-lease after successful \`${MONO_ASK_NEXT_BRANCH}\` build |"
-	summary "| \`${MONO_OSS_NEXT_BRANCH}\` | \`${mono_oss_next_sha}\` | Published atomically with force-with-lease after successful \`${MONO_ASK_NEXT_BRANCH}\` build |"
-	summary "| \`${MONO_ASK_NEXT_BRANCH}\` | \`${mono_ask_next_sha}\` | Published atomically with force-with-lease after successful build |"
+	summary "| \`${MAIN_BRANCH}\` | \`${main_sha}\` | Published atomically with force-with-lease after successful \`${MONO_ASK_BRANCH}\` build |"
+	summary "| \`${MONO_OSS_BRANCH}\` | \`${mono_oss_sha}\` | Published atomically with force-with-lease after successful \`${MONO_ASK_BRANCH}\` build |"
+	summary "| \`${MONO_ASK_BRANCH}\` | \`${mono_ask_sha}\` | Published atomically with force-with-lease after successful build |"
 	summary ""
-	summary "Validated branches \`${MONO_OSS_BRANCH}\` and \`${MONO_ASK_BRANCH}\` were not updated."
+	summary "These branches are compile/build-validated only. Hardware validation happens"
+	summary "exclusively through the release pipeline."
 }
 
 case "$MODE" in

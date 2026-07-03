@@ -1,0 +1,129 @@
+name: Cut Mono ASK Snapshot Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or SHA to snapshot. Defaults to the current mono-ask tip."
+        required: true
+        default: "mono-ask"
+        type: string
+      cache_epoch:
+        description: "Optional cache epoch override. Leave empty to use MONO_RELEASE_CACHE_EPOCH or v1."
+        required: false
+        type: string
+      cold_build:
+        description: "Skip restoring and saving caches for this run."
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mono-ask-cut-snapshot-release-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-snapshot:
+    name: Tag snapshot candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      release_tag: ${{ steps.prepare.outputs.release_tag }}
+      version_number: ${{ steps.prepare.outputs.version_number }}
+      version_code: ${{ steps.prepare.outputs.version_code }}
+    steps:
+      - name: Check out workflow branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Verify external actions are SHA pinned
+        run: |
+          set -euo pipefail
+          failures=0
+          while IFS= read -r ref; do
+            case "$ref" in
+              ./*|docker://*) continue ;;
+            esac
+
+            if ! printf '%s\n' "$ref" | grep -Eq '@[0-9a-f]{40}$'; then
+              printf '::error::External action is not pinned to a full commit SHA: %s\n' "$ref" >&2
+              failures=1
+            fi
+          done < <(grep -RhoE 'uses:[[:space:]]+[^[:space:]#]+' .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null | awk '{ print $2 }')
+
+          exit "$failures"
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Tag and push snapshot
+        id: prepare
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+
+          if git show-ref --verify --quiet "refs/remotes/origin/${REF}"; then
+            sha="$(git rev-parse "refs/remotes/origin/${REF}")"
+          else
+            sha="$(git rev-parse "${REF}^{commit}")"
+          fi
+
+          date="$(date -u +%Y-%m-%d)"
+          short_sha="$(git rev-parse --short=10 "$sha")"
+          release_tag="mono-ask-snapshot-${date}-${short_sha}"
+          version_number="snapshot-${date}"
+          version_code="$release_tag"
+
+          if git show-ref --verify --quiet "refs/tags/${release_tag}" ||
+             git ls-remote --exit-code --tags origin "refs/tags/${release_tag}" >/dev/null 2>&1; then
+            printf '::error::Snapshot tag %s already exists; wait a moment and retry, or pass a different ref\n' "$release_tag" >&2
+            exit 1
+          fi
+
+          git tag -a "$release_tag" "$sha" \
+            -m "Mono ASK snapshot pre-release cut from ${REF} (${sha}) on ${date}."
+          git push origin "refs/tags/${release_tag}"
+
+          {
+            printf 'release_tag=%s\n' "$release_tag"
+            printf 'version_number=%s\n' "$version_number"
+            printf 'version_code=%s\n' "$version_code"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Mono ASK snapshot preparation"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| source ref | \`${REF}\` |"
+            echo "| source commit | \`${sha}\` |"
+            echo "| snapshot tag | \`${release_tag}\` |"
+            echo "| image version | \`${version_number}\` |"
+            echo "| image code | \`${version_code}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-and-publish:
+    name: Build and publish
+    needs: prepare-snapshot
+    uses: ./.github/workflows/mono-ask-build-publish.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      release_tag: ${{ needs.prepare-snapshot.outputs.release_tag }}
+      version_number: ${{ needs.prepare-snapshot.outputs.version_number }}
+      version_code: ${{ needs.prepare-snapshot.outputs.version_code }}
+      cache_epoch: ${{ inputs.cache_epoch }}
+      cold_build: ${{ inputs.cold_build }}
