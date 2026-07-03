@@ -1,6 +1,13 @@
+From: Mono OpenWrt Integration <integration@mono.local>
+Date: Thu, 3 Jul 2026 12:00:00 +0100
+Subject: [PATCH] arm64: dts: freescale: build Mono Gateway Development Kit SDK dtb
+
+Port to Linux 6.18: context refresh only, no behavior change.
+
+---
 --- a/arch/arm64/boot/dts/freescale/Makefile
 +++ b/arch/arm64/boot/dts/freescale/Makefile
-@@ -24,6 +24,7 @@ dtb-$(CONFIG_ARCH_LAYERSCAPE) += fsl-ls1046a-rdb.dtb
+@@ -25,6 +25,7 @@
  dtb-$(CONFIG_ARCH_LAYERSCAPE) += fsl-ls1046a-tqmls1046a-mbls10xxa.dtb
  DTC_FLAGS_fsl-ls1088a-qds := -Wno-interrupt_map
  dtb-$(CONFIG_ARCH_LAYERSCAPE) += fsl-ls1088a-qds.dtb
