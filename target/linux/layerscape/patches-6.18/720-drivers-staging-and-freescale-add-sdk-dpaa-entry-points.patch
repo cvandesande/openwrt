@@ -1,40 +1,52 @@
+From: Mono OpenWrt Integration <integration@mono.local>
+Date: Thu, 3 Jul 2026 12:00:00 +0100
+Subject: [PATCH] drivers: staging, freescale: add SDK DPAA entry points
+
+Port to Linux 6.18: the drivers/staging and freescale Kconfig/Makefile
+source lists were reorganized upstream (new gpib, fieldbus, and dpaa2
+entries), so this hooks the vendor sdk_fman/sdk_dpaa/fsl_qbman build in at
+the current insertion points instead of the stale 6.12 ones.
+
+---
 --- a/drivers/net/ethernet/freescale/Kconfig
 +++ b/drivers/net/ethernet/freescale/Kconfig
-@@ -103,6 +103,8 @@ config GIANFAR
+@@ -100,6 +100,8 @@
  	  This driver supports the Gigabit TSEC on the MPC83xx, MPC85xx,
  	  and MPC86xx family of chips, the eTSEC on LS1021A and the FEC
  	  on the 8540.
 +source "drivers/net/ethernet/freescale/sdk_fman/Kconfig"
 +source "drivers/net/ethernet/freescale/sdk_dpaa/Kconfig"
-
+ 
  source "drivers/net/ethernet/freescale/dpaa/Kconfig"
  source "drivers/net/ethernet/freescale/dpaa2/Kconfig"
 --- a/drivers/net/ethernet/freescale/Makefile
 +++ b/drivers/net/ethernet/freescale/Makefile
-@@ -20,6 +20,9 @@ obj-$(CONFIG_GIANFAR) += gianfar_driver.o
+@@ -19,6 +19,9 @@
  obj-$(CONFIG_UCC_GETH) += ucc_geth_driver.o
  ucc_geth_driver-objs := ucc_geth.o ucc_geth_ethtool.o
-
+ 
 +obj-$(if $(CONFIG_FSL_SDK_FMAN),y) += sdk_fman/
 +obj-$(if $(CONFIG_FSL_SDK_DPAA_ETH),y) += sdk_dpaa/
 +
  obj-$(CONFIG_FSL_FMAN) += fman/
  obj-$(CONFIG_FSL_DPAA_ETH) += dpaa/
-
+ 
 --- a/drivers/staging/Kconfig
 +++ b/drivers/staging/Kconfig
-@@ -50,6 +50,8 @@ source "drivers/staging/vme_user/Kconfig"
-
+@@ -50,6 +50,8 @@
+ 
  source "drivers/staging/gpib/Kconfig"
-
+ 
 +source "drivers/staging/fsl_qbman/Kconfig"
 +
  source "drivers/staging/fsl_ppfe/Kconfig"
+ 
+ endif # STAGING
 --- a/drivers/staging/Makefile
 +++ b/drivers/staging/Makefile
-@@ -14,4 +14,5 @@ obj-$(CONFIG_GREYBUS)		+= greybus/
+@@ -14,4 +14,5 @@
  obj-$(CONFIG_BCM2835_VCHIQ)	+= vc04_services/
-+obj-$(CONFIG_FSL_SDK_DPA)	+= fsl_qbman/
  obj-$(CONFIG_XIL_AXIS_FIFO)	+= axis-fifo/
  obj-$(CONFIG_GPIB)	 	+= gpib/
++obj-$(CONFIG_FSL_SDK_DPA)	+= fsl_qbman/
  obj-$(CONFIG_FSL_PPFE)		+= fsl_ppfe/
