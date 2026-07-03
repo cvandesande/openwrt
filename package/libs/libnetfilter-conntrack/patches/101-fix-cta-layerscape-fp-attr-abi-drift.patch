@@ -1,0 +1,35 @@
+Port to Linux 6.18 investigation: this library bundles its own copy of the
+kernel's nfnetlink_conntrack.h enum rather than the real uapi header.
+Upstream Linux added CTA_TIMESTAMP_EVENT to that enum, between
+CTA_STATUS_MASK and __CTA_MAX, at some point after this library's bundled
+snapshot was taken but before 6.18 -- so the running 6.18 kernel's real
+enum has it, but this library's copy doesn't.
+
+Since 100-add-ask-runtime-state-attrs.patch inserts
+CTA_LAYERSCAPE_FP_ORIG/CTA_LAYERSCAPE_FP_REPLY right after
+CTA_STATUS_MASK in both the kernel and this library, the missing entry
+here shifts every enum value after it by one relative to the kernel's
+real numbering. Netlink attribute types are wire integers, so this
+isn't cosmetic: the kernel tags FP_ORIG data with one integer, this
+library reads it back under the wrong slot (actually CTA_TIMESTAMP_EVENT
+data, or nothing), FP_ORIG's real data gets misfiled as FP_REPLY, and the
+kernel's real FP_REPLY attribute lands one past this library's CTA_MAX
+and gets dropped by validation. End result: CMM never receives valid
+interface/mark metadata for any connection (visible as "orig-ifindex:
+-(0)" etc. in `cmm -c 'show connections'` for every entry, even under
+real sustained traffic), so it can never install a hardware fast-path
+route no matter how healthy FMan/PCD is.
+
+Add the missing enum entry in the same position the kernel has it so
+the numeric attribute types line up again.
+
+--- a/include/libnetfilter_conntrack/linux_nfnetlink_conntrack.h
++++ b/include/libnetfilter_conntrack/linux_nfnetlink_conntrack.h
+@@ -60,6 +60,7 @@
+ 	CTA_SYNPROXY,
+ 	CTA_FILTER,
+ 	CTA_STATUS_MASK,
++	CTA_TIMESTAMP_EVENT,
+ 	CTA_LAYERSCAPE_FP_ORIG,
+ 	CTA_LAYERSCAPE_FP_REPLY,
+ 	__CTA_MAX
