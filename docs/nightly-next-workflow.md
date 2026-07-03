@@ -1,59 +1,60 @@
-# Nightly Next Workflow
+# Nightly Build Workflow
 
-The `Nightly Next Branch Build` GitHub Actions workflow keeps automated
-tracking branches current without moving validated/public Mono branches.
-`main` is a filtered upstream tracking branch: it follows upstream OpenWrt
-source while preserving local exclusions such as workflow files. The `*-next`
-branches represent the most recent successful build of rebased validated
-branches, not merely the most recent successful rebase.
+The `Nightly Build` GitHub Actions workflow keeps `main`, `mono-oss`, and `mono-ask`
+current automatically. `main` is a filtered upstream tracking branch: it follows
+upstream OpenWrt source while preserving local exclusions such as workflow files.
+`mono-oss` and `mono-ask` are rebased on top of `main` every run, so all three branches
+represent the most recent successful nightly build, not merely the most recent rebase.
+
+**These three branches are compile/build-validated only.** A successful nightly run
+proves the rebased tree builds; it proves nothing about hardware behavior. Hardware
+validation happens exclusively through the release pipeline (see
+`docs/mono-release-workflow.md`): cut a release or snapshot pre-release, smoke test it
+on a controlled Mono Gateway, then promote the GitHub pre-release once validated. There
+is no separate "validated branch" tier and no manual promotion step between nightly CI
+and the release pipeline.
 
 It runs nightly and can also be started manually with `workflow_dispatch`.
 Scheduled workflows are loaded from the repository default branch, so changes
 to this workflow only affect nightly automation after they are present on the
 default branch.
 
-The repository default branch is `mono-ask`, not `main`. That is compatible
-with keeping `main` as an automation-maintained upstream tracking branch: the
-scheduled workflow definition is loaded from `mono-ask`, while the workflow
-updates `main` as data only after the rebased `mono-ask-next` candidate builds
-successfully. Workflow changes therefore take effect after they are manually
-promoted onto `mono-ask`.
+The repository default branch is `mono-ask`. That is compatible with the workflow
+updating `main`, `mono-oss`, and `mono-ask` directly, since the scheduled workflow
+definition itself is loaded from `mono-ask`'s current tip at run time.
 
 ## Branch Policy
 
-The workflow is allowed to update only these branches:
+The workflow updates these branches directly, after a successful build:
 
 - `main`
-- `mono-oss-next`
-- `mono-ask-next`
+- `mono-oss`
+- `mono-ask`
 
-It does not update `mono-oss` or `mono-ask`, does not create nightly tags, and
-does not promote nightly results into validated branches.
+It does not create nightly tags and does not gate these updates on hardware validation.
 
 The branch and build sequence is:
 
 1. Fetch `upstream/main` from `https://github.com/openwrt/openwrt.git`.
 2. Build a local `main` candidate from `upstream/main`, then restore excluded
    upstream paths such as `.github/workflows` from `origin/main`.
-3. Rebuild the local `mono-oss-next` candidate from the current validated
-   `mono-oss` tip, then rebase it onto `main`.
-4. Rebuild the local `mono-ask-next` candidate from the current validated
-   `mono-ask` tip, then rebase it onto the local `mono-oss-next` candidate.
+3. Rebuild the local `mono-oss` candidate from the current `mono-oss` tip, then rebase
+   it onto the local `main` candidate.
+4. Rebuild the local `mono-ask` candidate from the current `mono-ask` tip, then rebase
+   it onto the local `mono-oss` candidate.
 5. Save the prepared candidate refs into a short-lived Git bundle artifact.
-6. Build the local `mono-ask-next` candidate in a separate read-only job.
-7. Push `main`, `mono-oss-next`, and `mono-ask-next` atomically with
-   `--force-with-lease` only after the `mono-ask-next` build succeeds.
+6. Build the local `mono-ask` candidate in a separate read-only job.
+7. Push `main`, `mono-oss`, and `mono-ask` atomically with `--force-with-lease` only
+   after the `mono-ask` build succeeds.
 
 The workflow's `--force-with-lease` push is intentional. `main` is reconstructed
-from upstream OpenWrt plus local path exclusions, and the `*-next` branches are
-rebased tracking branches, so all three automation-managed refs may be
-rewritten. The workflow does not push `mono-oss` or `mono-ask`. Manual
-promotion of a validated result also uses `--force-with-lease`, but only after
-human smoke testing.
+from upstream OpenWrt plus local path exclusions, and `mono-oss`/`mono-ask` are rebased
+on top of it every run, so all three automation-managed refs may be rewritten.
 
-Each run starts from the current validated `mono-oss` and `mono-ask` branches.
-It does not use the previous `mono-oss-next` or `mono-ask-next` tips as rebase
-inputs, so unresolved nightly-only drift is discarded on the next run.
+Each run starts from the current remote `mono-oss` and `mono-ask` tips as rebase
+inputs, so the branches move forward incrementally rather than being torn down and
+rebuilt from scratch every night. A failed run leaves them unchanged; the next
+successful run picks up from wherever they currently are.
 
 ## Conflict Handling
 
@@ -64,16 +65,16 @@ notification settings.
 
 For rebase conflicts, the helper script prints conflicted paths and writes a
 failure section to the workflow summary. The workflow does not try to resolve
-conflicts automatically. Rebase failures do not move `main`, `mono-oss-next`,
-or `mono-ask-next`. Publication happens only after the build succeeds, and the
+conflicts automatically. Rebase failures do not move `main`, `mono-oss`,
+or `mono-ask`. Publication happens only after the build succeeds, and the
 publish push is atomic, so a lease or branch-protection failure leaves all
-three automation-managed branches unchanged.
+three branches unchanged.
 
 ## Build
 
 After local rebases succeed, the workflow passes the candidate refs to the
 build job through a Git bundle artifact. The build job checks out the
-candidate `mono-ask-next` commit from that bundle and runs the normal OpenWrt
+candidate `mono-ask` commit from that bundle and runs the normal OpenWrt
 build flow:
 
 ```sh
@@ -106,83 +107,35 @@ The default checked package paths are `package/kernel/ask-cdx`,
 `package/kernel/ask-fci`, `package/libs/libfci`, `package/network/ask-cmm`,
 and `package/network/ask-dpa-app`.
 
-If that build succeeds, the workflow publishes `main` and both `*-next`
-branches atomically. If the build fails, those branches keep their previous
-remote values.
+If that build succeeds, the workflow publishes `main`, `mono-oss`, and `mono-ask`
+atomically. If the build fails, those branches keep their previous remote values.
 
 Build logs, `.config`, and target output under
 `bin/targets/layerscape/armv8_64b/` are uploaded as workflow artifacts.
 
-## Smoke Testing mono-ask-next
+## Hardware Validation
 
-The nightly workflow proves that the rebased `mono-ask-next` candidate builds.
-It does not prove hardware behavior and must not be treated as validation by
-itself.
+The nightly workflow proves that the rebased `mono-ask` candidate builds. It does not
+prove hardware behavior and must not be treated as validation by itself.
 
-Use the latest successful `Nightly Next Branch Build` run on the default
-branch as the source of truth for a candidate. The run summary records the
-`main`, `mono-oss-next`, and `mono-ask-next` SHAs. Download the
-`mono-ask-next-firmware` artifact from that same run, and keep the
-`mono-ask-next-build-logs` artifact with the test record.
+Hardware validation happens only through the release pipeline, not against nightly
+`mono-ask` directly:
 
-If building locally instead of using the workflow artifact, prefer a detached
-checkout of the current remote tracking branch. The `*-next` branches are
-automation-owned and rewritten by rebase, so `git pull` on a local
-`mono-ask-next` branch can leave confusing ahead/behind state.
+- To validate an official upstream release cut, use `Cut Mono ASK Release Candidate`
+  followed by `Mono ASK Release Build`.
+- To smoke test current in-progress work without waiting for an official upstream
+  release, use `Cut Mono ASK Snapshot Release` to tag current `mono-ask` and publish it
+  as a pre-release.
 
-```sh
-git fetch origin
-git switch --detach origin/mono-ask-next
+Both paths produce a GitHub pre-release firmware artifact. See
+`docs/mono-release-workflow.md` for the exact commands and inputs.
 
-./scripts/feeds update -a
-./scripts/feeds install -a
-cp config/mono_gateway-dk.seed .config
-make defconfig
-make download -j"$(nproc)"
-make -j"$(nproc)"
-```
-
-For a custom local config, copy your config to `.config` in place of the seed
-config and still run `make defconfig` before building. If you choose to keep a
-named local `mono-ask-next` branch, refresh it explicitly before each local
-smoke-test build:
-
-```sh
-git fetch origin
-git switch mono-ask-next
-git reset --hard origin/mono-ask-next
-```
-
-`reset --hard` discards uncommitted local changes on that branch. Do not use it
-with a dirty worktree.
-
-Before flashing, record the exact candidate and artifact checksum:
-
-```sh
-git fetch origin
-git rev-parse origin/mono-oss-next
-git rev-parse origin/mono-ask-next
-find . -name '*mono_gateway-dk*sysupgrade*' -type f -exec sha256sum {} +
-```
-
-Flash only a lab or otherwise controlled Mono Gateway first. On the target,
-make a config backup before testing the sysupgrade path:
-
-```sh
-IMAGE=/tmp/openwrt-layerscape-armv8_64b-mono_gateway-dk-ext4-sysupgrade.bin.gz
-sysupgrade -b /tmp/pre-mono-ask-next-backup.tar.gz
-sysupgrade "$IMAGE"
-```
-
-Use `sysupgrade -n` only when deliberately testing a clean-config boot. The
-normal promotion smoke test should exercise the expected upgrade path and known
-test configuration.
-
-After boot, the minimum smoke test is:
+Regardless of which path produced the candidate, the minimum smoke test before
+promoting a pre-release is:
 
 - Confirm the device boots the tested image and stays reachable over the
   management path.
-- Confirm `/etc/openwrt_release`, `uname -a`, and the recorded branch SHA or
+- Confirm `/etc/openwrt_release`, `uname -a`, and the recorded release tag or
   artifact checksum match the candidate under test.
 - Confirm the expected packages are installed with
   `opkg list-installed | grep -E 'ask-cmm|ask-dpa-app|ask-fci|ask-cdx|libfci'`.
@@ -204,102 +157,30 @@ Control-plane installed state alone is not enough; keep traffic-generator
 results, relevant `cmm` output, hardware counters, and CPU-path observations
 with the test record.
 
-Record at least the workflow run, candidate SHAs, firmware checksum, device
-serial, test configuration, topology, pass/fail result, and any deviations. If
-any smoke test fails, do not promote the `*-next` branches.
+Record at least the release tag, firmware checksum, device serial, test
+configuration, topology, pass/fail result, and any deviations. If any smoke test
+fails, do not promote the GitHub pre-release.
 
-## Promoting Tested Next Branches
-
-Promotion is manual. The nightly workflow never moves `mono-oss` or
-`mono-ask`, never tags nightly runs, and never claims that a successful build is
-hardware validation.
-
-Promote only after the matching `mono-ask-next` firmware has passed the smoke
-tests above. Promote `mono-oss` first, then `mono-ask`, because
-`mono-ask-next` is rebased on top of `mono-oss-next`.
-
-Because the `*-next` branches are rebuilt by rebasing, `mono-oss` is usually
-not an ancestor of `mono-oss-next`, and `mono-ask` is usually not an ancestor
-of `mono-ask-next`. A fast-forward merge is therefore not the correct
-promotion operation for this branch model.
-
-Promotion is a controlled remote branch update from the already tested
-`*-next` refs. Run this from a trusted local checkout:
+Before flashing, record the exact candidate and artifact checksum:
 
 ```sh
-git fetch origin main mono-oss mono-ask mono-oss-next mono-ask-next
-
-git merge-base --is-ancestor origin/main origin/mono-oss-next
-git merge-base --is-ancestor origin/mono-oss-next origin/mono-ask-next
-
-oss_old="$(git rev-parse origin/mono-oss)"
-ask_old="$(git rev-parse origin/mono-ask)"
-
-git push --atomic \
-  --force-with-lease=refs/heads/mono-oss:"$oss_old" \
-  --force-with-lease=refs/heads/mono-ask:"$ask_old" \
-  origin \
-  origin/mono-oss-next:refs/heads/mono-oss \
-  origin/mono-ask-next:refs/heads/mono-ask
+git fetch origin --tags
+git rev-parse "$RELEASE_TAG"
+find . -name '*mono_gateway-dk*sysupgrade*' -type f -exec sha256sum {} +
 ```
 
-The ancestry checks ensure the tested `mono-oss-next` contains the current
-`main` and that the tested `mono-ask-next` contains the tested `mono-oss-next`.
-If either check fails, stop.
-
-The lease values ensure the push updates `mono-oss` and `mono-ask` only if
-GitHub still has the exact branch tips you fetched. If someone else updated a
-validated branch after your fetch, the push fails instead of overwriting their
-work.
-
-After a successful promotion, refresh local branch checkouts if you use them:
+Flash only a lab or otherwise controlled Mono Gateway first. On the target,
+make a config backup before testing the sysupgrade path:
 
 ```sh
-git fetch origin
-
-git switch mono-oss
-git reset --hard origin/mono-oss
-
-git switch mono-ask
-git reset --hard origin/mono-ask
+IMAGE=/tmp/openwrt-layerscape-armv8_64b-mono_gateway-dk-ext4-sysupgrade.bin.gz
+sysupgrade -b /tmp/pre-release-backup.tar.gz
+sysupgrade "$IMAGE"
 ```
 
-Use `reset --hard` only with a clean worktree. If a local `mono-ask-next` or
-`mono-oss-next` branch exists, it must also be explicitly reset to the remote
-tracking ref before use, or avoided by using `git switch --detach
-origin/mono-ask-next`.
-
-Do not use `git merge --no-ff` to promote a tested next branch unless the
-branch model is intentionally being changed from rebase-based history to
-merge-based history.
-
-After promotion, trigger a manual `Nightly Next Branch Build` run or wait for
-the next scheduled run. The next run should rebuild `mono-oss-next` and
-`mono-ask-next` from the newly promoted validated branches.
-
-Create a tag only if you intentionally want to mark a validated release point.
-Nightly automation must not create tags, and a tag should refer to the tested
-validated branch SHA, not to an untested intermediate result.
-
-If tagging a validated smoke-test point, tag after promotion and tag
-`origin/mono-ask`, not `mono-ask-next`:
-
-```sh
-git fetch origin mono-ask
-
-sha="$(git rev-parse origin/mono-ask)"
-short_sha="$(git rev-parse --short=10 origin/mono-ask)"
-tag_name="mono-ask-validated-$(date -u +%Y-%m-%d)-${short_sha}"
-
-git tag -a "$tag_name" "$sha" \
-  -m "Validated mono-ask $(date -u +%Y-%m-%d) at ${short_sha}"
-
-git push origin "refs/tags/${tag_name}"
-```
-
-Use a date-plus-SHA tag name so more than one validated build can be recorded
-on the same day without tag-name collisions. Do not move existing validation
-tags; create a new tag for a new validation point.
+Use `sysupgrade -n` only when deliberately testing a clean-config boot. The
+normal smoke test should exercise the expected upgrade path and known test
+configuration.
 
 ## Security Model
 
@@ -312,8 +193,8 @@ The workflow separates branch mutation from build execution:
   and runs `feeds`, `defconfig`, `make download`, and `make`. This keeps the
   repository write token out of the job that executes OpenWrt package and build
   logic.
-- `publish-next` has `contents: write`; it downloads the already-built bundle
-  and publishes `mono-oss-next` and `mono-ask-next`. It does not run the build.
+- `publish-branches` has `contents: write`; it downloads the already-built bundle
+  and publishes `main`, `mono-oss`, and `mono-ask`. It does not run the build.
 
 External GitHub Actions are pinned to full commit SHAs, with comments recording
 the corresponding release versions. This is intentional: recent CI/CD supply
@@ -397,17 +278,10 @@ branches. The build job uses read-level permissions and should not be granted
 repository write access.
 
 This requires repository Actions workflow permissions to allow read/write
-tokens. If `main` is branch-protected against direct pushes by GitHub Actions,
-or if `main`, `mono-oss-next`, or `mono-ask-next` are protected against
-force pushes, the atomic publication push will fail. In those cases, either
-relax protection for the automation branches or switch to an explicit GitHub
-App/PAT with the required bypass rights.
+tokens. If `main`, `mono-oss`, or `mono-ask` are branch-protected against direct
+or force pushes by GitHub Actions, the atomic publication push will fail. In
+those cases, either relax protection for these branches or switch to an
+explicit GitHub App/PAT with the required bypass rights.
 
-Manual promotion updates `mono-oss` and `mono-ask` with `--force-with-lease`
-because the validated branches move to rebased, tested commits. If those
-validated branches are protected against force pushes, manual promotion will
-fail unless the maintainer has bypass rights, protection is temporarily
-relaxed, or the branch model is redesigned to avoid rebased promotion.
-
-The workflow intentionally treats nightly `*-next` builds as integration
-signals only. They are not hardware validation and are not release points.
+The workflow intentionally treats nightly builds as integration signals only.
+They are not hardware validation and are not release points.
