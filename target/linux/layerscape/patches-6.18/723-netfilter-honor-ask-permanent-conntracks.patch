@@ -12,10 +12,14 @@ Permanent entries retain a bounded visible timeout for userspace display and
 remain non-expired while established. The procfs dump also prints
 [PERMANENT] so pinned state is auditable during runtime validation.
 
+Port to Linux 6.18: context refresh for upstream API/behavior changes
+between 6.12 and 6.18 (see individual hunks); no functional change beyond
+adapting to the new kernel APIs.
+
 ---
 --- a/include/net/netfilter/nf_conntrack.h
 +++ b/include/net/netfilter/nf_conntrack.h
-@@ -24,6 +24,8 @@
+@@ -23,6 +23,8 @@
  
  #include <net/netfilter/nf_conntrack_tuple.h>
  
@@ -24,7 +28,7 @@ remain non-expired while established. The procfs dump also prints
  struct nf_ct_udp {
  	unsigned long	stream_ts;
  };
-@@ -284,6 +286,11 @@
+@@ -270,6 +272,11 @@
  	return test_bit(IPS_DYING_BIT, &ct->status);
  }
  
@@ -36,7 +40,7 @@ remain non-expired while established. The procfs dump also prints
  /* Packet is received from loopback */
  static inline bool nf_is_loopback_packet(const struct sk_buff *skb)
  {
-@@ -307,10 +314,15 @@
+@@ -293,10 +300,15 @@
  {
  	s32 timeout = READ_ONCE(ct->timeout) - nfct_time_stamp;
  
@@ -55,7 +59,7 @@ remain non-expired while established. The procfs dump also prints
  }
 --- a/net/netfilter/nf_conntrack_core.c
 +++ b/net/netfilter/nf_conntrack_core.c
-@@ -2866,3 +2866,17 @@
+@@ -2822,3 +2822,17 @@
  	return 0;
  }
  EXPORT_SYMBOL_GPL(nf_ct_change_status_common);
@@ -75,7 +79,7 @@ remain non-expired while established. The procfs dump also prints
 +EXPORT_SYMBOL_GPL(nf_ct_is_expired);
 --- a/net/netfilter/nf_conntrack_netlink.c
 +++ b/net/netfilter/nf_conntrack_netlink.c
-@@ -2431,6 +2431,40 @@
+@@ -2388,6 +2388,40 @@
  	return ERR_PTR(err);
  }
  
@@ -116,7 +120,7 @@ remain non-expired while established. The procfs dump also prints
  static int ctnetlink_new_conntrack(struct sk_buff *skb,
  				   const struct nfnl_info *info,
  				   const struct nlattr * const cda[])
-@@ -2510,6 +2544,12 @@
+@@ -2467,6 +2501,12 @@
  	err = -EEXIST;
  	ct = nf_ct_tuplehash_to_ctrack(h);
  	if (!(info->nlh->nlmsg_flags & NLM_F_EXCL)) {
@@ -131,7 +135,7 @@ remain non-expired while established. The procfs dump also prints
  			nf_conntrack_eventmask_report((1 << IPCT_REPLY) |
 --- a/net/netfilter/nf_conntrack_standalone.c
 +++ b/net/netfilter/nf_conntrack_standalone.c
-@@ -338,6 +338,12 @@
+@@ -353,6 +353,12 @@
  	if (seq_has_overflowed(s))
  		goto release;
  

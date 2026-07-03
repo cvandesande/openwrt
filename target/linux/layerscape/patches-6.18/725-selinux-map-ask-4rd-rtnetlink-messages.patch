@@ -1,23 +1,18 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Mono OpenWrt Integration <openwrt@mono.example>
-Date: Sat, 9 May 2026 20:25:00 +0000
+From: Mono OpenWrt Integration <integration@mono.local>
+Date: Thu, 3 Jul 2026 12:00:00 +0100
 Subject: [PATCH] selinux: map ASK 4RD rtnetlink messages when enabled
 
-NXP ASK 4RD compatibility uses private route-netlink message ids 97-99.
-Keep their SELinux mapping behind CONFIG_CPE_4RD_TUNNEL so default
-OpenWrt kernels remain unchanged, while a future build that deliberately
-enables the 4RD kernel compatibility ABI will not log these messages as
-unrecognized.
----
- security/selinux/nlmsgtab.c | 14 ++++++++++++++
- 1 file changed, 14 insertions(+)
+Port to Linux 6.18: the nlmsg_route_perms table was reformatted upstream
+(single-space alignment, plus a new RTM_TIMESTAMP_EVENT entry) and gained
+entries. Keep this a pure append after RTM_NEWCACHEREPORT.
 
+---
 --- a/security/selinux/nlmsgtab.c
 +++ b/security/selinux/nlmsgtab.c
-@@ -77,6 +77,20 @@ static const struct nlmsg_perm nlmsg_rou
- 	{ RTM_GETSTATS,		NETLINK_ROUTE_SOCKET__NLMSG_READ  },
- 	{ RTM_SETSTATS,		NETLINK_ROUTE_SOCKET__NLMSG_WRITE },
- 	{ RTM_NEWCACHEREPORT,	NETLINK_ROUTE_SOCKET__NLMSG_READ },
+@@ -77,6 +77,20 @@
+ 	{ RTM_GETSTATS, NETLINK_ROUTE_SOCKET__NLMSG_READ },
+ 	{ RTM_SETSTATS, NETLINK_ROUTE_SOCKET__NLMSG_WRITE },
+ 	{ RTM_NEWCACHEREPORT, NETLINK_ROUTE_SOCKET__NLMSG_READ },
 +#if defined(CONFIG_CPE_4RD_TUNNEL) || defined(CONFIG_CPE_4RD_TUNNEL_MODULE)
 +#ifndef RTM_NEW4RD
 +#define RTM_NEW4RD	97
@@ -28,10 +23,10 @@ unrecognized.
 +#ifndef RTM_GET4RD
 +#define RTM_GET4RD	99
 +#endif
-+	{ RTM_NEW4RD,		NETLINK_ROUTE_SOCKET__NLMSG_WRITE },
-+	{ RTM_DEL4RD,		NETLINK_ROUTE_SOCKET__NLMSG_WRITE },
-+	{ RTM_GET4RD,		NETLINK_ROUTE_SOCKET__NLMSG_READ  },
++	{ RTM_NEW4RD, NETLINK_ROUTE_SOCKET__NLMSG_WRITE },
++	{ RTM_DEL4RD, NETLINK_ROUTE_SOCKET__NLMSG_WRITE },
++	{ RTM_GET4RD, NETLINK_ROUTE_SOCKET__NLMSG_READ },
 +#endif
- 	{ RTM_NEWCHAIN,		NETLINK_ROUTE_SOCKET__NLMSG_WRITE },
- 	{ RTM_DELCHAIN,		NETLINK_ROUTE_SOCKET__NLMSG_WRITE },
- 	{ RTM_GETCHAIN,		NETLINK_ROUTE_SOCKET__NLMSG_READ  },
+ 	{ RTM_NEWCHAIN, NETLINK_ROUTE_SOCKET__NLMSG_WRITE },
+ 	{ RTM_DELCHAIN, NETLINK_ROUTE_SOCKET__NLMSG_WRITE },
+ 	{ RTM_GETCHAIN, NETLINK_ROUTE_SOCKET__NLMSG_READ },

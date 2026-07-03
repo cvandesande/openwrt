@@ -159,7 +159,7 @@ struct qman_portal {
 	/* power management data */
 	u32 save_isdr;
 #ifdef CONFIG_FSL_ASK_QMAN_PORTAL_NAPI
-	struct net_device dummy_dev;
+	struct net_device *dummy_dev;
 	struct napi_struct napi;
 #endif
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -802,8 +802,12 @@ struct qman_portal *qman_create_portal(
 	}
 #ifdef CONFIG_FSL_ASK_QMAN_PORTAL_NAPI
 	/* Initilize NAPI for Rx processing */
-	init_dummy_netdev(&portal->dummy_dev);
-	netif_napi_add_weight(&portal->dummy_dev, &portal->napi, qman_portal_dqrr_poll, 64); //DPA_NAPI_WEIGHT);
+	portal->dummy_dev = alloc_netdev_dummy(0);
+	if (!portal->dummy_dev) {
+		pr_err("%s: Failed to allocate qman dummy netdev\n", __func__);
+		goto fail_dummy_netdev;
+	}
+	netif_napi_add_weight(portal->dummy_dev, &portal->napi, qman_portal_dqrr_poll, 64); //DPA_NAPI_WEIGHT);
 	napi_enable(&portal->napi);
 #endif
 	/* Success */
@@ -822,6 +826,7 @@ struct qman_portal *qman_create_portal(
 	/* Write a sane SDQCR */
 	qm_dqrr_sdqcr_set(__p, portal->sdqcr);
 	return portal;
+fail_dummy_netdev:
 fail_dqrr_mr_empty:
 fail_eqcr_empty:
 fail_affinity:
