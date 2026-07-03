@@ -101,6 +101,15 @@ struct sfp_led_port {
 	struct net_device *netdev;
 	char netdev_name[IFNAMSIZ];
 
+	/*
+	 * Anchor device for devm_of_led_get(), whose of_node is this port's
+	 * sfp_np rather than the sfp-led platform device's own of_node.
+	 * Registered alongside sfp_np and unregistered in
+	 * sfp_led_cleanup_port(), so its devres-managed LED references are
+	 * released on the same schedule the old manual led_put() calls used.
+	 */
+	struct device led_dev;
+
 	struct led_classdev *link_led;
 	struct led_classdev *activity_led;
 
@@ -481,11 +490,17 @@ reschedule:
 			      msecs_to_jiffies(SFP_LED_POLL_INTERVAL_MS));
 }
 
+static void sfp_led_port_dev_release(struct device *dev)
+{
+	/* dev is embedded in the devm-owned priv->ports array; nothing to free. */
+}
+
 static int sfp_led_register_port(struct sfp_led_priv *priv,
 				 struct device_node *sfp_np, int index)
 {
 	struct sfp_led_port *port = &priv->ports[index];
 	struct device_node *i2c_np;
+	int ret;
 
 	port->priv = priv;
 	port->sfp_np = sfp_np;
@@ -499,7 +514,7 @@ static int sfp_led_register_port(struct sfp_led_priv *priv,
 	}
 
 	if (IS_ERR_OR_NULL(port->i2c_adapter)) {
-		int ret = PTR_ERR_OR_ZERO(port->i2c_adapter);
+		ret = PTR_ERR_OR_ZERO(port->i2c_adapter);
 
 		port->i2c_adapter = NULL;
 		if (ret != -EPROBE_DEFER)
@@ -509,15 +524,41 @@ static int sfp_led_register_port(struct sfp_led_priv *priv,
 		return ret ? ret : -ENODEV;
 	}
 
+	/*
+	 * Anchor device for devm_of_led_get(): its of_node is this port's
+	 * sfp_np, not the sfp-led platform device's own of_node, so the LED
+	 * lookup resolves the "leds" phandle on the right node. Unregistering
+	 * it in sfp_led_cleanup_port() releases the LED references via devres.
+	 */
+	device_initialize(&port->led_dev);
+	port->led_dev.parent = priv->dev;
+	port->led_dev.release = sfp_led_port_dev_release;
+	port->led_dev.of_node = sfp_np;
+	of_node_get(sfp_np);
+	dev_set_name(&port->led_dev, "port%d", index);
+
+	ret = device_add(&port->led_dev);
+	if (ret) {
+		dev_err(priv->dev, "port %d: failed to add LED anchor device: %d\n",
+			index, ret);
+		of_node_put(sfp_np);
+		put_device(&port->led_dev);
+		i2c_put_adapter(port->i2c_adapter);
+		port->i2c_adapter = NULL;
+		of_node_put(sfp_np);
+		port->sfp_np = NULL;
+		return ret;
+	}
+
 	/* Get LEDs */
-	port->link_led = of_led_get(sfp_np, 0);
+	port->link_led = devm_of_led_get(&port->led_dev, 0);
 	if (IS_ERR(port->link_led)) {
 		dev_dbg(priv->dev, "port %d: link LED not in DT: %ld\n",
 			index, PTR_ERR(port->link_led));
 		port->link_led = NULL;
 	}
 
-	port->activity_led = of_led_get(sfp_np, 1);
+	port->activity_led = devm_of_led_get(&port->led_dev, 1);
 	if (IS_ERR(port->activity_led)) {
 		dev_dbg(priv->dev, "port %d: activity LED not in DT: %ld\n",
 			index, PTR_ERR(port->activity_led));
@@ -561,15 +602,16 @@ static void sfp_led_cleanup_port(struct sfp_led_port *port)
 	sfp_led_set_link(port, false);
 	sfp_led_set_activity(port, false);
 
-	if (port->activity_led) {
-		led_put(port->activity_led);
-		port->activity_led = NULL;
-	}
+	port->link_led = NULL;
+	port->activity_led = NULL;
 
-	if (port->link_led) {
-		led_put(port->link_led);
-		port->link_led = NULL;
-	}
+	/*
+	 * Releases the devm_of_led_get() LED references via devres, then
+	 * drops the extra of_node ref taken for led_dev.of_node in
+	 * sfp_led_register_port().
+	 */
+	device_unregister(&port->led_dev);
+	of_node_put(port->sfp_np);
 
 	if (port->netdev) {
 		dev_put(port->netdev);
