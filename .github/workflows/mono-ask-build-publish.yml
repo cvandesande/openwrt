@@ -1,51 +1,66 @@
-name: Nightly Build
+name: Mono ASK Build and Publish
 
 on:
-  schedule:
-    - cron: "17 2 * * *"
-  workflow_dispatch:
+  workflow_call:
     inputs:
+      release_tag:
+        description: "Annotated tag to build and publish as a GitHub pre-release. Either an official mono-ask-vX.Y.Z-rN release tag or a mono-ask-snapshot-<date>-<sha> snapshot tag."
+        required: true
+        type: string
+      version_number:
+        description: "Image release number embedded in /etc/openwrt_release."
+        required: true
+        type: string
+      version_code:
+        description: "Image release code embedded in /etc/openwrt_version."
+        required: true
+        type: string
       cache_epoch:
-        description: "Optional cache epoch override. Leave empty to use MONO_NIGHTLY_CACHE_EPOCH or v1."
+        description: "Optional cache epoch override. Leave empty to use MONO_RELEASE_CACHE_EPOCH or v1."
         required: false
         type: string
       cold_build:
         description: "Skip restoring and saving caches for this run."
         required: true
-        default: false
         type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: nightly-build
+  group: mono-ask-build-publish-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 env:
-  CACHE_EPOCH: ${{ inputs.cache_epoch || vars.MONO_NIGHTLY_CACHE_EPOCH || 'v1' }}
-  CANDIDATE_BUNDLE: nightly-build-candidates.bundle
-  CANDIDATE_ARTIFACT: nightly-build-candidates
+  CACHE_EPOCH: ${{ inputs.cache_epoch || vars.MONO_RELEASE_CACHE_EPOCH || 'v1' }}
+  RELEASE_ARTIFACT: mono-ask-release-payload
+  RELEASE_TAG: ${{ inputs.release_tag }}
+  VERSION_NUMBER: ${{ inputs.version_number }}
+  VERSION_CODE: ${{ inputs.version_code }}
 
 jobs:
-  prepare-candidates:
-    name: Prepare candidate branches
+  build-release:
+    name: Build release candidate
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 360
     permissions:
-      contents: write
+      contents: read
+      actions: read
     outputs:
-      main_sha: ${{ steps.prepare.outputs.main_sha }}
-      mono_oss_sha: ${{ steps.prepare.outputs.mono_oss_sha }}
-      mono_ask_sha: ${{ steps.prepare.outputs.mono_ask_sha }}
+      candidate_sha: ${{ steps.verify-candidate.outputs.candidate_sha }}
+      image_prefix: ${{ steps.verify-artifacts.outputs.image_prefix }}
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/source/.ccache
     steps:
       - name: Check out workflow branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0
-          persist-credentials: true
+          fetch-depth: 1
+          persist-credentials: false
+          path: workflow
 
       - name: Verify external actions are SHA pinned
+        working-directory: ${{ github.workspace }}/workflow
         run: |
           set -euo pipefail
           failures=0
@@ -62,57 +77,80 @@ jobs:
 
           exit "$failures"
 
-      - name: Configure Git identity
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Prepare local main/mono-oss/mono-ask candidates
-        id: prepare
-        run: NIGHTLY_BUILD_MODE=prepare bash .github/workflows/scripts/update-nightly-tracking-branches.sh
-
-      - name: Bundle candidate refs
-        run: |
-          git bundle create "/tmp/${CANDIDATE_BUNDLE}" main mono-oss mono-ask
-          cd /tmp
-          sha256sum "${CANDIDATE_BUNDLE}" | tee "${CANDIDATE_BUNDLE}.sha256"
-
-      - name: Upload candidate bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Check out release tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          name: ${{ env.CANDIDATE_ARTIFACT }}
-          if-no-files-found: error
-          retention-days: 1
-          path: |
-            /tmp/${{ env.CANDIDATE_BUNDLE }}
-            /tmp/${{ env.CANDIDATE_BUNDLE }}.sha256
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+          path: source
 
-  build-candidate:
-    name: Build mono-ask candidate
-    needs: prepare-candidates
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    permissions:
-      contents: read
-      actions: read
-    env:
-      CCACHE_DIR: ${{ github.workspace }}/source/.ccache
-    steps:
-      - name: Download candidate bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ env.CANDIDATE_ARTIFACT }}
-          path: /tmp/nightly-build-candidate
-
-      - name: Check out mono-ask candidate from bundle
+      - name: Verify release tag
+        id: verify-candidate
+        working-directory: ${{ github.workspace }}/source
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          VERSION_CODE: ${{ inputs.version_code }}
+          VERSION_NUMBER: ${{ inputs.version_number }}
         run: |
           set -euo pipefail
-          cd /tmp/nightly-build-candidate
-          sha256sum -c "${CANDIDATE_BUNDLE}.sha256"
-          git clone "${CANDIDATE_BUNDLE}" "${GITHUB_WORKSPACE}/source"
-          cd "${GITHUB_WORKSPACE}/source"
-          git switch --force-create mono-ask origin/mono-ask
-          test "$(git rev-parse HEAD)" = "${{ needs.prepare-candidates.outputs.mono_ask_sha }}"
+
+          if printf '%s\n' "$RELEASE_TAG" | grep -Eq '^mono-ask-v[0-9]+[.][0-9]+[.][0-9]+-r[0-9]+$'; then
+            tag_kind=official
+          elif printf '%s\n' "$RELEASE_TAG" | grep -Eq '^mono-ask-snapshot-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f]{7,40}$'; then
+            tag_kind=snapshot
+          else
+            printf '::error::Unexpected release tag format: %s\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          if [ "$VERSION_CODE" != "$RELEASE_TAG" ]; then
+            printf '::error::version_code (%s) must match release_tag (%s)\n' "$VERSION_CODE" "$RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          case "$tag_kind" in
+          official)
+            if ! printf '%s\n' "$VERSION_NUMBER" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+-mono[0-9]+$'; then
+              printf '::error::Unexpected version_number format: %s\n' "$VERSION_NUMBER" >&2
+              exit 1
+            fi
+
+            tag_version="${RELEASE_TAG#mono-ask-v}"
+            tag_version="${tag_version%-r*}"
+            image_version="${VERSION_NUMBER%-mono*}"
+            if [ "$image_version" != "$tag_version" ]; then
+              printf '::error::version_number (%s) must use release tag version %s\n' "$VERSION_NUMBER" "$tag_version" >&2
+              exit 1
+            fi
+            ;;
+          snapshot)
+            if ! printf '%s\n' "$VERSION_NUMBER" | grep -Eq '^snapshot-[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+              printf '::error::Unexpected version_number format for a snapshot tag: %s\n' "$VERSION_NUMBER" >&2
+              exit 1
+            fi
+            ;;
+          esac
+
+          tag_type="$(git cat-file -t "refs/tags/${RELEASE_TAG}")"
+          if [ "$tag_type" != tag ]; then
+            printf '::error::%s must be an annotated tag; got Git object type %s\n' "$RELEASE_TAG" "$tag_type" >&2
+            exit 1
+          fi
+
+          candidate_sha="$(git rev-parse "refs/tags/${RELEASE_TAG}^{}")"
+          head_sha="$(git rev-parse HEAD)"
+          if [ "$candidate_sha" != "$head_sha" ]; then
+            printf '::error::Checked-out HEAD %s does not match tag target %s\n' "$head_sha" "$candidate_sha" >&2
+            exit 1
+          fi
+
+          {
+            printf 'candidate_sha=%s\n' "$candidate_sha"
+            printf 'short_candidate_sha=%s\n' "$(git rev-parse --short=12 HEAD)"
+            printf 'tag_kind=%s\n' "$tag_kind"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Free runner disk space
         working-directory: ${{ github.workspace }}/source
@@ -128,6 +166,7 @@ jobs:
             build-essential \
             ccache \
             clang \
+            e2fsprogs \
             flex \
             bison \
             g++ \
@@ -154,9 +193,9 @@ jobs:
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: source/dl
-          key: ${{ runner.os }}-${{ runner.arch }}-openwrt-dl-${{ env.CACHE_EPOCH }}-${{ hashFiles('source/feeds.conf.default', 'source/feeds.conf') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-mono-release-dl-${{ env.CACHE_EPOCH }}-${{ hashFiles('source/feeds.conf.default', 'source/feeds.conf') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-openwrt-dl-${{ env.CACHE_EPOCH }}-
+            ${{ runner.os }}-${{ runner.arch }}-mono-release-dl-${{ env.CACHE_EPOCH }}-
 
       - name: Update feeds
         working-directory: ${{ github.workspace }}/source
@@ -164,11 +203,23 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Configure Mono Gateway DK build
+      - name: Configure Mono Gateway DK release build
         working-directory: ${{ github.workspace }}/source
+        env:
+          VERSION_NUMBER: ${{ inputs.version_number }}
+          VERSION_CODE: ${{ inputs.version_code }}
         run: |
+          set -euo pipefail
+
           cp config/mono_gateway-dk.seed .config
           {
+            printf 'CONFIG_IMAGEOPT=y\n'
+            printf 'CONFIG_VERSIONOPT=y\n'
+            printf 'CONFIG_VERSION_DIST="Mono OpenWrt"\n'
+            printf 'CONFIG_VERSION_NUMBER="%s"\n' "$VERSION_NUMBER"
+            printf 'CONFIG_VERSION_CODE="%s"\n' "$VERSION_CODE"
+            printf 'CONFIG_DEVEL=y\n'
+            printf 'CONFIG_CCACHE=y\n'
             printf 'CONFIG_CCACHE_DIR="%s/.ccache"\n' "$PWD"
             printf 'CONFIG_BUILD_LOG=y\n'
           } >> .config
@@ -182,7 +233,7 @@ jobs:
         id: cache-keys
         working-directory: ${{ github.workspace }}/source
         env:
-          CACHE_PREFIX: ${{ runner.os }}-${{ runner.arch }}-openwrt
+          CACHE_PREFIX: ${{ runner.os }}-${{ runner.arch }}-mono-release
         run: |
           set -euo pipefail
 
@@ -397,11 +448,101 @@ jobs:
           path: source/staging_dir/hostpkg
           key: ${{ steps.cache-keys.outputs.hostpkg_key }}
 
+      - name: Verify release artifacts
+        id: verify-artifacts
+        working-directory: ${{ github.workspace }}/source
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          VERSION_NUMBER: ${{ inputs.version_number }}
+          VERSION_CODE: ${{ inputs.version_code }}
+          TAG_KIND: ${{ steps.verify-candidate.outputs.tag_kind }}
+        run: |
+          set -euo pipefail
+
+          target_dir="bin/targets/layerscape/armv8_64b"
+          image_prefix="mono-openwrt-${VERSION_NUMBER}-layerscape-armv8_64b-mono_gateway-dk"
+          sysupgrade="${target_dir}/${image_prefix}-ext4-sysupgrade.bin.gz"
+          rootfs="${target_dir}/${image_prefix}-ext4-rootfs.ext4.gz"
+          manifest="${target_dir}/${image_prefix}.manifest"
+
+          test -f "$sysupgrade"
+          test -f "$rootfs"
+          test -f "$manifest"
+          test -f "${target_dir}/sha256sums"
+          test -f "${target_dir}/config.buildinfo"
+          test -f "${target_dir}/feeds.buildinfo"
+          test -f "${target_dir}/profiles.json"
+          test -f "${target_dir}/version.buildinfo"
+
+          grep -F "CONFIG_VERSION_DIST=\"Mono OpenWrt\"" "${target_dir}/config.buildinfo"
+          grep -F "CONFIG_VERSION_NUMBER=\"${VERSION_NUMBER}\"" "${target_dir}/config.buildinfo"
+          grep -F "CONFIG_VERSION_CODE=\"${VERSION_CODE}\"" "${target_dir}/config.buildinfo"
+          grep -F "\"image_prefix\":\"${image_prefix}\"" "${target_dir}/profiles.json"
+
+          tmp_rootfs="$(mktemp)"
+          gzip -dc "$rootfs" > "$tmp_rootfs"
+          /usr/sbin/debugfs -R 'cat /etc/openwrt_release' "$tmp_rootfs" > /tmp/openwrt_release 2>/tmp/debugfs-openwrt-release.log
+          /usr/sbin/debugfs -R 'cat /usr/lib/os-release' "$tmp_rootfs" > /tmp/os_release 2>/tmp/debugfs-os-release.log
+          /usr/sbin/debugfs -R 'cat /etc/openwrt_version' "$tmp_rootfs" > /tmp/openwrt_version 2>/tmp/debugfs-openwrt-version.log
+          rm -f "$tmp_rootfs"
+
+          grep -F "DISTRIB_ID='Mono OpenWrt'" /tmp/openwrt_release
+          grep -F "DISTRIB_RELEASE='${VERSION_NUMBER}'" /tmp/openwrt_release
+          grep -F "DISTRIB_DESCRIPTION='Mono OpenWrt ${VERSION_NUMBER} ${VERSION_CODE}'" /tmp/openwrt_release
+          grep -F "OPENWRT_RELEASE=\"Mono OpenWrt ${VERSION_NUMBER} ${VERSION_CODE}\"" /tmp/os_release
+          grep -Fx "$VERSION_CODE" /tmp/openwrt_version
+
+          mkdir -p /tmp/release-payload
+          cp \
+            "$sysupgrade" \
+            "$rootfs" \
+            "$manifest" \
+            "${target_dir}/sha256sums" \
+            "${target_dir}/config.buildinfo" \
+            "${target_dir}/feeds.buildinfo" \
+            "${target_dir}/profiles.json" \
+            "${target_dir}/version.buildinfo" \
+            /tmp/release-payload/
+
+          if [ "$TAG_KIND" = official ]; then
+            upstream_version="${RELEASE_TAG#mono-ask-v}"
+            upstream_version="${upstream_version%-r*}"
+            upstream_line="$(printf -- '- Upstream base: OpenWrt `v%s`\n' "$upstream_version")"
+            kind_note="This is a Mono OpenWrt pre-release for controlled smoke testing."
+          else
+            upstream_line="- Upstream base: current \`mono-ask\` nightly tip at tag time (not tied to an official upstream release)"
+            kind_note="This is an ad-hoc Mono OpenWrt SNAPSHOT pre-release cut from current mono-ask for smoke testing in-progress work. It is not an official release candidate."
+          fi
+
+          {
+            printf '# Mono OpenWrt %s %s\n\n' "$VERSION_NUMBER" "$RELEASE_TAG"
+            printf '%s\n\n' "$kind_note"
+            printf '## Source\n\n'
+            printf -- '- Tag: `%s`\n' "$RELEASE_TAG"
+            printf -- '- Commit: `%s`\n' "${{ steps.verify-candidate.outputs.candidate_sha }}"
+            printf '%s\n' "$upstream_line"
+            printf -- '- Image version: `%s`\n' "$VERSION_NUMBER"
+            printf -- '- Image code: `%s`\n\n' "$VERSION_CODE"
+            printf '## CI Validation\n\n'
+            printf -- '- Mono vendor source hash preflight passed.\n'
+            printf -- '- `make download -j$(nproc)` passed.\n'
+            printf -- '- `make -j$(nproc)` passed.\n'
+            printf -- '- Rootfs release metadata matches `Mono OpenWrt %s %s`.\n\n' "$VERSION_NUMBER" "$VERSION_CODE"
+            printf '## Hardware Validation\n\n'
+            printf 'Hardware smoke validation is pending. Do not promote this pre-release to a full release until the Mono Gateway DK smoke-test record passes.\n'
+          } > /tmp/release-payload/RELEASE_NOTES.md
+
+          {
+            printf 'image_prefix=%s\n' "$image_prefix"
+            printf 'sysupgrade=%s\n' "$(basename "$sysupgrade")"
+            printf 'rootfs=%s\n' "$(basename "$rootfs")"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Upload build logs
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mono-ask-build-logs
+          name: mono-ask-release-build-logs
           if-no-files-found: warn
           retention-days: 14
           path: |
@@ -412,28 +553,28 @@ jobs:
             source/make.log
             source/logs/**
 
-      - name: Upload firmware artifacts
-        if: ${{ always() && steps.build.outcome == 'success' }}
+      - name: Upload release payload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mono-ask-firmware
-          if-no-files-found: warn
+          name: ${{ env.RELEASE_ARTIFACT }}
+          if-no-files-found: error
           retention-days: 14
-          path: |
-            source/bin/targets/layerscape/armv8_64b/**
+          path: /tmp/release-payload/**
 
       - name: Write build summary
         if: ${{ always() }}
         run: |
           {
-            echo "### mono-ask build"
+            echo "### Mono ASK release build"
             echo
             echo "| Item | Value |"
             echo "| --- | --- |"
-            echo "| main candidate | \`${{ needs.prepare-candidates.outputs.main_sha }}\` |"
-            echo "| mono-oss candidate | \`${{ needs.prepare-candidates.outputs.mono_oss_sha }}\` |"
-            echo "| mono-ask candidate | \`${{ needs.prepare-candidates.outputs.mono_ask_sha }}\` |"
+            echo "| release tag | \`${RELEASE_TAG}\` |"
+            echo "| candidate SHA | \`${{ steps.verify-candidate.outputs.candidate_sha }}\` |"
+            echo "| image version | \`${VERSION_NUMBER}\` |"
+            echo "| image code | \`${VERSION_CODE}\` |"
             echo "| build result | \`${{ steps.build.outcome }}\` |"
+            echo "| image prefix | \`${{ steps.verify-artifacts.outputs.image_prefix }}\` |"
             echo "| cache epoch | \`${CACHE_EPOCH}\` |"
             echo "| cold build | \`${{ inputs.cold_build == true }}\` |"
             echo "| dl cache | \`${{ steps.cache-state.outputs.dl_state }}\` |"
@@ -444,47 +585,58 @@ jobs:
             echo "| toolchain install | \`${{ steps.validate-toolchain.outputs.elapsed_seconds }}s, ${{ steps.validate-toolchain.outputs.rebuild_count }} rebuilds\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  publish-branches:
-    name: Publish main/mono-oss/mono-ask
-    needs:
-      - prepare-candidates
-      - build-candidate
+  publish-prerelease:
+    name: Publish GitHub pre-release
+    needs: build-release
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
       actions: read
     steps:
-      - name: Download candidate bundle
+      - name: Download release payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ${{ env.CANDIDATE_ARTIFACT }}
-          path: /tmp/nightly-build-candidate
+          name: ${{ env.RELEASE_ARTIFACT }}
+          path: release-payload
 
-      - name: Check out candidate refs from bundle
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          VERSION_NUMBER: ${{ inputs.version_number }}
+          VERSION_CODE: ${{ inputs.version_code }}
+          CANDIDATE_SHA: ${{ needs.build-release.outputs.candidate_sha }}
         run: |
           set -euo pipefail
-          cd /tmp/nightly-build-candidate
-          sha256sum -c "${CANDIDATE_BUNDLE}.sha256"
-          git clone "${CANDIDATE_BUNDLE}" "${GITHUB_WORKSPACE}/source"
-          cd "${GITHUB_WORKSPACE}/source"
-          git switch --force-create main origin/main
-          git switch --force-create mono-oss origin/mono-oss
-          git switch --force-create mono-ask origin/mono-ask
-          test "$(git rev-parse mono-oss)" = "${{ needs.prepare-candidates.outputs.mono_oss_sha }}"
-          test "$(git rev-parse mono-ask)" = "${{ needs.prepare-candidates.outputs.mono_ask_sha }}"
 
-      - name: Configure authenticated origin
-        working-directory: ${{ github.workspace }}/source
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            printf '::error::GitHub release already exists for tag %s; refusing to overwrite it\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
 
-      - name: Publish main/mono-oss/mono-ask
-        id: publish
-        working-directory: ${{ github.workspace }}/source
-        run: NIGHTLY_BUILD_MODE=publish bash .github/workflows/scripts/update-nightly-tracking-branches.sh
+          mapfile -t assets < <(find release-payload -maxdepth 1 -type f ! -name RELEASE_NOTES.md -print | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            printf '::error::No release assets found\n' >&2
+            exit 1
+          fi
+
+          gh release create "$RELEASE_TAG" "${assets[@]}" \
+            --verify-tag \
+            --prerelease \
+            --latest=false \
+            --title "Mono OpenWrt ${VERSION_NUMBER} ${RELEASE_TAG}" \
+            --notes-file release-payload/RELEASE_NOTES.md
+
+          {
+            echo "### Mono ASK pre-release"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| release tag | \`${RELEASE_TAG}\` |"
+            echo "| candidate SHA | \`${CANDIDATE_SHA}\` |"
+            echo "| image version | \`${VERSION_NUMBER}\` |"
+            echo "| image code | \`${VERSION_CODE}\` |"
+            echo "| release state | \`pre-release\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

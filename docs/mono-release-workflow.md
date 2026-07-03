@@ -1,9 +1,26 @@
 # Mono Release Workflow
 
-The preferred release path is `Cut Mono ASK Release Candidate`. It takes an
-official upstream OpenWrt release tag, prepares the three Mono release refs,
-builds the candidate firmware, and publishes the successful CI output as a
-GitHub pre-release.
+There are two ways to produce a hardware-validatable Mono OpenWrt pre-release:
+an official release cut tied to an upstream OpenWrt tag (`Cut Mono ASK Release
+Candidate`), and an ad-hoc snapshot cut from the current `mono-ask` tip
+(`Cut Mono ASK Snapshot Release`), for smoke testing in-progress work without
+waiting for the next official upstream release. Both produce a GitHub
+pre-release built by the same underlying `Mono ASK Build and Publish` reusable
+workflow, and both are gated on manual hardware smoke testing before
+promotion; see `docs/nightly-next-workflow.md`'s "Hardware Validation" section
+for the smoke-test procedure that applies to either path.
+
+Nightly CI (`Nightly Build`) only proves that `main`, `mono-oss`, and
+`mono-ask` build; it does not gate on hardware validation and does not itself
+produce a release. Cut a release or snapshot from the branch you want to
+validate.
+
+## Official Release Cut
+
+The preferred official release path is `Cut Mono ASK Release Candidate`. It
+takes an official upstream OpenWrt release tag, prepares the three Mono
+release refs, builds the candidate firmware, and publishes the successful CI
+output as a GitHub pre-release.
 
 The candidate prep step uses the normal branch hierarchy but narrows the replay
 ranges for a stable release cut: `main..mono-oss` is replayed onto the official
@@ -31,14 +48,45 @@ version_code:   mono-ask-v25.12.4-r1
 ```
 
 The older `Mono ASK Release Build` workflow remains available for rebuilding
-and publishing an already cut, annotated Mono ASK release tag. Its first
-intended use was:
+and publishing an already cut, annotated Mono ASK release tag (official format
+only). Its first intended use was:
 
 ```text
 release_tag:    mono-ask-v25.12.3-r1
 version_number: 25.12.3-mono1
 version_code:   mono-ask-v25.12.3-r1
 ```
+
+## Snapshot Pre-releases
+
+Use `Cut Mono ASK Snapshot Release` to smoke test current in-progress work
+without waiting for the next official upstream release cut. It takes a single
+`ref` input (default: `mono-ask`), tags that commit directly — no replay onto
+an upstream tag, no `mono-oss`/`mono-ask` split, since it snapshots whatever
+`ref` already is — and builds/publishes it through the same
+`Mono ASK Build and Publish` reusable workflow as an official release.
+
+Tag and version derivation:
+
+```text
+release_tag:    mono-ask-snapshot-<UTC date>-<short SHA>
+version_number: snapshot-<UTC date>
+version_code:   mono-ask-snapshot-<UTC date>-<short SHA>
+```
+
+For example, tagging current `mono-ask` on 2026-07-04 might produce
+`mono-ask-snapshot-2026-07-04-a1b2c3d4e5`. The workflow refuses to reuse an
+existing snapshot tag; if you need another snapshot the same day, wait for a
+new commit or use a different `ref`.
+
+Snapshot pre-releases are not tied to an official upstream version and are
+not expected to be long-lived — they exist to get a specific commit onto real
+hardware quickly. Promote one to a full release the same way as an official
+release candidate (`Promote Mono ASK Release`) only if you specifically want
+to keep it around; more often a snapshot will simply be superseded by the next
+one or by an official release cut.
+
+## Release Publication
 
 The release workflows deliberately do not create a full stable release. The
 GitHub release is marked as a pre-release and explicitly not marked as
@@ -48,7 +96,7 @@ GitHub release manually in the GitHub Web UI.
 
 ## Security Model
 
-The workflow keeps the same CI/CD safety posture as the nightly next workflow:
+The workflow keeps the same CI/CD safety posture as the nightly workflow:
 
 - External GitHub Actions are pinned to full commit SHAs.
 - A guard step fails the run if any external action in `.github/workflows` is
