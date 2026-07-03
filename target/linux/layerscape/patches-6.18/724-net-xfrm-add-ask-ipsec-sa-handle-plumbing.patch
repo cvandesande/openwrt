@@ -22,11 +22,14 @@ the IPsec PDB structs.  This is the narrow IPsec-only part of the vendor SDK
 change needed so descriptor fields such as the outbound ESP SPI land at the
 offsets expected by hardware.
 
+Port to Linux 6.18: context refresh for upstream API/behavior changes
+between 6.12 and 6.18 (see individual hunks); no functional change beyond
+adapting to the new kernel APIs.
+
 ---
-diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
 --- a/include/linux/skbuff.h
 +++ b/include/linux/skbuff.h
-@@ -1030,6 +1030,11 @@
+@@ -1049,6 +1049,11 @@
  	/* Preserve the physical ingress ifindex after bridge handoff. */
  	int			layerscape_underlying_iif;
  #endif
@@ -38,7 +41,6 @@ diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
  	__u32			hash;
  	union {
  		u32		vlan_all;
-diff --git a/include/net/netns/xfrm.h b/include/net/netns/xfrm.h
 --- a/include/net/netns/xfrm.h
 +++ b/include/net/netns/xfrm.h
 @@ -43,6 +43,9 @@
@@ -51,10 +53,9 @@ diff --git a/include/net/netns/xfrm.h b/include/net/netns/xfrm.h
  	struct hlist_head	 __percpu *state_cache_input;
  	unsigned int		state_hmask;
  	unsigned int		state_num;
-diff --git a/include/net/xfrm.h b/include/net/xfrm.h
 --- a/include/net/xfrm.h
 +++ b/include/net/xfrm.h
-@@ -184,6 +184,14 @@
+@@ -197,6 +197,14 @@
  	};
  	struct hlist_node	byspi;
  	struct hlist_node	byseq;
@@ -69,7 +70,7 @@ diff --git a/include/net/xfrm.h b/include/net/xfrm.h
  	struct hlist_node	state_cache;
  	struct hlist_node	state_cache_input;
  
-@@ -1663,6 +1671,9 @@
+@@ -1729,6 +1737,9 @@
  					    const xfrm_address_t *saddr,
  					    u8 proto,
  					    unsigned short family);
@@ -79,7 +80,21 @@ diff --git a/include/net/xfrm.h b/include/net/xfrm.h
  #ifdef CONFIG_XFRM_SUB_POLICY
  void xfrm_tmpl_sort(struct xfrm_tmpl **dst, struct xfrm_tmpl **src, int n,
  		    unsigned short family);
-diff --git a/include/uapi/linux/netlink.h b/include/uapi/linux/netlink.h
+@@ -1786,11 +1797,11 @@
+ 				   struct sk_buff *));
+ int xfrm_output_resume(struct sock *sk, struct sk_buff *skb, int err);
+ int xfrm_output(struct sock *sk, struct sk_buff *skb);
+-int xfrm4_tunnel_check_size(struct sk_buff *skb);
++int xfrm4_tunnel_check_size(struct xfrm_state *x, struct sk_buff *skb);
+ #if IS_ENABLED(CONFIG_IPV6)
+-int xfrm6_tunnel_check_size(struct sk_buff *skb);
++int xfrm6_tunnel_check_size(struct xfrm_state *x, struct sk_buff *skb);
+ #else
+-static inline int xfrm6_tunnel_check_size(struct sk_buff *skb)
++static inline int xfrm6_tunnel_check_size(struct xfrm_state *x, struct sk_buff *skb)
+ {
+ 	return -EMSGSIZE;
+ }
 --- a/include/uapi/linux/netlink.h
 +++ b/include/uapi/linux/netlink.h
 @@ -29,10 +29,11 @@
@@ -95,12 +110,9 @@ diff --git a/include/uapi/linux/netlink.h b/include/uapi/linux/netlink.h
  
  struct sockaddr_nl {
  	__kernel_sa_family_t	nl_family;	/* AF_NETLINK	*/
-diff --git a/net/core/skbuff.c b/net/core/skbuff.c
 --- a/net/core/skbuff.c
 +++ b/net/core/skbuff.c
-@@ -1555,8 +1555,13 @@
- 	CHECK_SKB_FIELD(priority);
- 	CHECK_SKB_FIELD(skb_iif);
+@@ -1525,6 +1525,11 @@
  #if IS_ENABLED(CONFIG_NF_CONNTRACK)
  	CHECK_SKB_FIELD(layerscape_underlying_iif);
  #endif
@@ -112,17 +124,19 @@ diff --git a/net/core/skbuff.c b/net/core/skbuff.c
  	CHECK_SKB_FIELD(vlan_proto);
  	CHECK_SKB_FIELD(vlan_tci);
  	CHECK_SKB_FIELD(transport_header);
-@@ -6133,3 +6138,6 @@ void skb_scrub_packet(struct sk_buff *skb, bool xnet)
+@@ -6244,6 +6249,9 @@
+ #endif
  	skb->ignore_df = 0;
  	skb_dst_drop(skb);
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
 +	if (!skb->ipsec_offload)
 +#endif
  	skb_ext_reset(skb);
-diff --git a/net/ipv4/esp4_offload.c b/net/ipv4/esp4_offload.c
+ 	nf_reset_ct(skb);
+ 	nf_reset_trace(skb);
 --- a/net/ipv4/esp4_offload.c
 +++ b/net/ipv4/esp4_offload.c
-@@ -272,6 +272,9 @@ static int esp_xmit(struct xfrm_state *x
+@@ -272,6 +272,9 @@
  	struct crypto_aead *aead;
  	struct esp_info esp;
  	bool hw_offload = true;
@@ -132,7 +146,7 @@ diff --git a/net/ipv4/esp4_offload.c b/net/ipv4/esp4_offload.c
  	__u32 seq;
  	int encap_type = 0;
  
-@@ -291,6 +294,26 @@ static int esp_xmit(struct xfrm_state *x
+@@ -291,6 +294,26 @@
  
  	esp.proto = xo->proto;
  
@@ -159,10 +173,9 @@ diff --git a/net/ipv4/esp4_offload.c b/net/ipv4/esp4_offload.c
  	/* skb is pure payload to encrypt */
  
  	aead = x->data;
-diff --git a/net/ipv6/esp6_offload.c b/net/ipv6/esp6_offload.c
 --- a/net/ipv6/esp6_offload.c
 +++ b/net/ipv6/esp6_offload.c
-@@ -310,6 +310,9 @@ static int esp6_xmit(struct xfrm_state *
+@@ -310,6 +310,9 @@
  	struct crypto_aead *aead;
  	struct esp_info esp;
  	bool hw_offload = true;
@@ -172,7 +185,7 @@ diff --git a/net/ipv6/esp6_offload.c b/net/ipv6/esp6_offload.c
  	__u32 seq;
  
  	esp.inplace = true;
-@@ -326,6 +329,26 @@ static int esp6_xmit(struct xfrm_state *
+@@ -326,6 +329,26 @@
  
  	esp.proto = xo->proto;
  
@@ -199,7 +212,6 @@ diff --git a/net/ipv6/esp6_offload.c b/net/ipv6/esp6_offload.c
  	/* skb is pure payload to encrypt */
  
  	aead = x->data;
-diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig
 --- a/net/ipv4/Kconfig
 +++ b/net/ipv4/Kconfig
 @@ -380,6 +380,16 @@
@@ -219,7 +231,6 @@ diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig
  config INET_ESPINTCP
  	bool "IP: ESP in TCP encapsulation (RFC 8229)"
  	depends on XFRM && INET_ESP
-diff --git a/net/ipv6/Kconfig b/net/ipv6/Kconfig
 --- a/net/ipv6/Kconfig
 +++ b/net/ipv6/Kconfig
 @@ -91,6 +91,16 @@
@@ -239,7 +250,6 @@ diff --git a/net/ipv6/Kconfig b/net/ipv6/Kconfig
  config INET6_ESPINTCP
  	bool "IPv6: ESP in TCP encapsulation (RFC 8229)"
  	depends on XFRM && INET6_ESP
-diff --git a/net/key/af_key.c b/net/key/af_key.c
 --- a/net/key/af_key.c
 +++ b/net/key/af_key.c
 @@ -26,9 +26,141 @@
@@ -384,7 +394,7 @@ diff --git a/net/key/af_key.c b/net/key/af_key.c
  #define _X2KEY(x) ((x) == XFRM_INF ? 0 : (x))
  #define _KEY2X(x) ((x) == 0 ? XFRM_INF : (x))
  
-@@ -3076,6 +3207,10 @@
+@@ -3092,6 +3224,10 @@
  	struct net *net = x ? xs_net(x) : c->net;
  	struct netns_pfkey *net_pfkey = net_generic(net, pfkey_net_id);
  
@@ -395,7 +405,7 @@ diff --git a/net/key/af_key.c b/net/key/af_key.c
  	if (atomic_read(&net_pfkey->socks_nr) == 0)
  		return 0;
  
-@@ -3857,6 +3993,435 @@
+@@ -3873,6 +4009,435 @@
  }
  #endif
  
@@ -831,7 +841,7 @@ diff --git a/net/key/af_key.c b/net/key/af_key.c
  static struct xfrm_mgr pfkeyv2_mgr =
  {
  	.notify		= pfkey_send_notify,
-@@ -3902,6 +4380,10 @@
+@@ -3918,6 +4483,10 @@
  	sock_unregister(PF_KEY);
  	unregister_pernet_subsys(&pfkey_net_ops);
  	proto_unregister(&key_proto);
@@ -842,7 +852,7 @@ diff --git a/net/key/af_key.c b/net/key/af_key.c
  }
  
  static int __init ipsec_pfkey_init(void)
-@@ -3918,9 +4400,19 @@
+@@ -3934,9 +4503,19 @@
  	if (err != 0)
  		goto out_unregister_pernet;
  	xfrm_register_km(&pfkeyv2_mgr);
@@ -862,21 +872,145 @@ diff --git a/net/key/af_key.c b/net/key/af_key.c
  out_unregister_pernet:
  	unregister_pernet_subsys(&pfkey_net_ops);
  out_unregister_key_proto:
-diff --git a/net/xfrm/xfrm_input.c b/net/xfrm/xfrm_input.c
 --- a/net/xfrm/xfrm_input.c
 +++ b/net/xfrm/xfrm_input.c
-@@ -44,6 +44,10 @@
+@@ -15,12 +15,16 @@
+ #include <linux/module.h>
+ #include <linux/netdevice.h>
+ #include <linux/percpu.h>
++#include <linux/tcp.h>
++#include <net/checksum.h>
+ #include <net/dst.h>
+ #include <net/ip.h>
++#include <net/tcp.h>
+ #include <net/xfrm.h>
+ #include <net/ip_tunnels.h>
+ #include <net/ip6_tunnel.h>
+ #include <net/dst_metadata.h>
++#include <net/ipv6.h>
+ #include <net/hotdata.h>
+ 
+ #include "xfrm_inout.h"
+@@ -44,6 +48,118 @@
  
  #define XFRM_TRANS_SKB_CB(__skb) ((struct xfrm_trans_cb *)&((__skb)->cb[0]))
  
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
 +extern int dpaa_submit_inb_pkt_to_SEC(struct sk_buff *skb, uint16_t sagd);
++
++static unsigned int xfrm_ipsec_native_inner_mtu(struct xfrm_state *x,
++						struct sk_buff *skb)
++{
++	struct dst_entry *dst = skb_dst(skb);
++
++	return dst ? xfrm_state_mtu(x, dst_mtu(dst)) : 0;
++}
++
++static void xfrm_ipsec_native_mss_clamp(struct xfrm_state *x,
++					struct sk_buff *skb)
++{
++	unsigned int mtu = xfrm_ipsec_native_inner_mtu(x, skb);
++	unsigned int tcp_hdrlen;
++	unsigned int thoff;
++	struct tcphdr *th;
++	u16 newmss;
++	u8 *opt;
++	int i;
++
++	if (!mtu)
++		return;
++
++	switch (skb->protocol) {
++	case htons(ETH_P_IP):
++		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
++			return;
++		if (ip_hdr(skb)->protocol != IPPROTO_TCP || ip_is_fragment(ip_hdr(skb)))
++			return;
++		thoff = ip_hdrlen(skb);
++		break;
++#if IS_ENABLED(CONFIG_IPV6)
++	case htons(ETH_P_IPV6): {
++		__be16 frag_off;
++		u8 nexthdr;
++		int offset;
++
++		if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
++			return;
++
++		nexthdr = ipv6_hdr(skb)->nexthdr;
++		offset = ipv6_skip_exthdr(skb, sizeof(struct ipv6hdr),
++					  &nexthdr, &frag_off);
++		if (offset < 0 || nexthdr != IPPROTO_TCP || frag_off)
++			return;
++
++		thoff = offset;
++		break;
++	}
++#endif
++	default:
++		return;
++	}
++
++	if (!pskb_may_pull(skb, thoff + sizeof(struct tcphdr)))
++		return;
++	if (skb_ensure_writable(skb, thoff + sizeof(struct tcphdr)))
++		return;
++
++	th = (struct tcphdr *)(skb_network_header(skb) + thoff);
++	if (!th->syn || th->rst)
++		return;
++
++	tcp_hdrlen = th->doff * 4;
++	if (tcp_hdrlen < sizeof(struct tcphdr))
++		return;
++	if (!pskb_may_pull(skb, thoff + tcp_hdrlen))
++		return;
++	if (skb_ensure_writable(skb, thoff + tcp_hdrlen))
++		return;
++
++	th = (struct tcphdr *)(skb_network_header(skb) + thoff);
++	if (mtu <= thoff + tcp_hdrlen || mtu - thoff - tcp_hdrlen > U16_MAX)
++		return;
++	newmss = mtu - thoff - tcp_hdrlen;
++	opt = (u8 *)th;
++
++	for (i = sizeof(struct tcphdr); i < tcp_hdrlen;) {
++		unsigned int optlen;
++		u16 oldmss;
++
++		if (opt[i] == TCPOPT_EOL)
++			break;
++		if (opt[i] == TCPOPT_NOP) {
++			i++;
++			continue;
++		}
++		if (i + 1 >= tcp_hdrlen)
++			break;
++
++		optlen = opt[i + 1];
++		if (optlen < 2 || i + optlen > tcp_hdrlen)
++			break;
++
++		if (opt[i] == TCPOPT_MSS && optlen == TCPOLEN_MSS) {
++			oldmss = (opt[i + 2] << 8) | opt[i + 3];
++			if (oldmss <= newmss)
++				return;
++			opt[i + 2] = newmss >> 8;
++			opt[i + 3] = newmss & 0xff;
++			inet_proto_csum_replace2(&th->check, skb,
++						 htons(oldmss), htons(newmss),
++						 false);
++			return;
++		}
++		i += optlen;
++	}
++}
 +#endif
 +
  static DEFINE_SPINLOCK(xfrm_input_afinfo_lock);
  static struct xfrm_input_afinfo const __rcu *xfrm_input_afinfo[2][AF_INET6 + 1];
  
-@@ -599,6 +603,17 @@
+@@ -610,6 +726,17 @@
  			goto drop;
  		}
  
@@ -894,19 +1028,38 @@ diff --git a/net/xfrm/xfrm_input.c b/net/xfrm/xfrm_input.c
  lock:
  		spin_lock(&x->lock);
  
-diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
+@@ -684,6 +811,11 @@
+ 		}
+ 
+ 		xfrm_replay_advance(x, seq);
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++		if (x->offloaded)
++			xfrm_ipsec_native_mss_clamp(x, skb);
++#endif
++
+ 
+ 		x->curlft.bytes += skb->len;
+ 		x->curlft.packets++;
 --- a/net/xfrm/xfrm_output.c
 +++ b/net/xfrm/xfrm_output.c
-@@ -12,6 +12,8 @@
+@@ -12,10 +12,16 @@
  #include <linux/skbuff.h>
  #include <linux/slab.h>
  #include <linux/spinlock.h>
 +#include <linux/tcp.h>
 +#include <linux/udp.h>
++#include <net/checksum.h>
  #include <net/dst.h>
  #include <net/gso.h>
  #include <net/icmp.h>
-@@ -28,6 +30,81 @@
+ #include <net/inet_ecn.h>
++#include <net/ip.h>
++#include <net/ipv6.h>
++#include <net/tcp.h>
+ #include <net/xfrm.h>
+ 
+ #if IS_ENABLED(CONFIG_IPV6)
+@@ -28,6 +34,181 @@
  static int xfrm_output2(struct net *net, struct sock *sk, struct sk_buff *skb);
  static int xfrm_inner_extract_output(struct xfrm_state *x, struct sk_buff *skb);
  
@@ -944,6 +1097,106 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
 +
 +	return dst ? xfrm_ipsec_native_mtu_margin(
 +		     xfrm_state_mtu(x, dst_mtu(dst))) : 0;
++}
++
++static void xfrm_ipsec_native_mss_clamp(struct xfrm_state *x,
++					struct sk_buff *skb)
++{
++	unsigned int mtu = xfrm_ipsec_native_mtu(x, skb);
++	unsigned int tcp_hdrlen;
++	unsigned int thoff;
++	struct tcphdr *th;
++	u16 newmss;
++	u8 *opt;
++	int i;
++
++	if (!mtu)
++		return;
++
++	switch (skb->protocol) {
++	case htons(ETH_P_IP):
++		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
++			return;
++		if (ip_hdr(skb)->protocol != IPPROTO_TCP || ip_is_fragment(ip_hdr(skb)))
++			return;
++		thoff = ip_hdrlen(skb);
++		break;
++#if IS_ENABLED(CONFIG_IPV6)
++	case htons(ETH_P_IPV6): {
++		__be16 frag_off;
++		u8 nexthdr;
++		int offset;
++
++		if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
++			return;
++
++		nexthdr = ipv6_hdr(skb)->nexthdr;
++		offset = ipv6_skip_exthdr(skb, sizeof(struct ipv6hdr),
++					  &nexthdr, &frag_off);
++		if (offset < 0 || nexthdr != IPPROTO_TCP || frag_off)
++			return;
++
++		thoff = offset;
++		break;
++	}
++#endif
++	default:
++		return;
++	}
++
++	if (!pskb_may_pull(skb, thoff + sizeof(struct tcphdr)))
++		return;
++	if (skb_ensure_writable(skb, thoff + sizeof(struct tcphdr)))
++		return;
++
++	th = (struct tcphdr *)(skb_network_header(skb) + thoff);
++	if (!th->syn || th->rst)
++		return;
++
++	tcp_hdrlen = th->doff * 4;
++	if (tcp_hdrlen < sizeof(struct tcphdr))
++		return;
++	if (!pskb_may_pull(skb, thoff + tcp_hdrlen))
++		return;
++	if (skb_ensure_writable(skb, thoff + tcp_hdrlen))
++		return;
++
++	th = (struct tcphdr *)(skb_network_header(skb) + thoff);
++	if (mtu <= thoff + tcp_hdrlen || mtu - thoff - tcp_hdrlen > U16_MAX)
++		return;
++	newmss = mtu - thoff - tcp_hdrlen;
++	opt = (u8 *)th;
++
++	for (i = sizeof(struct tcphdr); i < tcp_hdrlen;) {
++		unsigned int optlen;
++		u16 oldmss;
++
++		if (opt[i] == TCPOPT_EOL)
++			break;
++		if (opt[i] == TCPOPT_NOP) {
++			i++;
++			continue;
++		}
++		if (i + 1 >= tcp_hdrlen)
++			break;
++
++		optlen = opt[i + 1];
++		if (optlen < 2 || i + optlen > tcp_hdrlen)
++			break;
++
++		if (opt[i] == TCPOPT_MSS && optlen == TCPOLEN_MSS) {
++			oldmss = (opt[i + 2] << 8) | opt[i + 3];
++			if (oldmss <= newmss)
++				return;
++			opt[i + 2] = newmss >> 8;
++			opt[i + 3] = newmss & 0xff;
++			inet_proto_csum_replace2(&th->check, skb,
++						 htons(oldmss), htons(newmss),
++						 false);
++			return;
++		}
++		i += optlen;
++	}
 +}
 +
 +static bool xfrm_ipsec_native_gso_prepare(struct xfrm_state *x,
@@ -988,7 +1241,7 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
  static int xfrm_skb_check_space(struct sk_buff *skb)
  {
  	struct dst_entry *dst = skb_dst(skb);
-@@ -67,6 +130,10 @@ static int xfrm4_transport_output(struct xfrm_state *x, struct sk_buff *skb)
+@@ -67,6 +248,10 @@
  	struct iphdr *iph = ip_hdr(skb);
  	int ihl = iph->ihl * 4;
  
@@ -999,7 +1252,7 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
  	skb_set_inner_transport_header(skb, skb_transport_offset(skb));
  
  	skb_set_network_header(skb, -x->props.header_len);
-@@ -167,6 +234,10 @@ static int xfrm6_transport_output(struct xfrm_state *x, struct sk_buff *skb)
+@@ -167,6 +352,10 @@
  	u8 *prevhdr;
  	int hdr_len;
  
@@ -1010,7 +1263,7 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
  	iph = ipv6_hdr(skb);
  	skb_set_inner_transport_header(skb, skb_transport_offset(skb));
  
-@@ -413,6 +484,10 @@ static int xfrm4_prepare_output(struct xfrm_state *x, struct sk_buff *skb)
+@@ -413,6 +602,10 @@
  	IPCB(skb)->flags |= IPSKB_XFRM_TUNNEL_SIZE;
  	skb->protocol = htons(ETH_P_IP);
  
@@ -1021,7 +1274,7 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
  	switch (x->props.mode) {
  	case XFRM_MODE_BEET:
  		return xfrm4_beet_encap_add(x, skb);
-@@ -436,6 +511,10 @@ static int xfrm6_prepare_output(struct xfrm_state *x, struct sk_buff *skb)
+@@ -436,6 +629,10 @@
  	skb->ignore_df = 1;
  	skb->protocol = htons(ETH_P_IPV6);
  
@@ -1032,7 +1285,7 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
  	switch (x->props.mode) {
  	case XFRM_MODE_BEET:
  		return xfrm6_beet_encap_add(x, skb);
-@@ -492,11 +571,41 @@ static int xfrm_output_one(struct sk_buff *skb, int err)
+@@ -494,11 +691,42 @@
  	struct dst_entry *dst = skb_dst(skb);
  	struct xfrm_state *x = dst->xfrm;
  	struct net *net = xs_net(x);
@@ -1062,6 +1315,7 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
 +			skb->ipsec_sa_handle = x->handle;
 +			skb->ipsec_xfrm_dir |= 1 << XFRM_POLICY_OUT;
 +
++			xfrm_ipsec_native_mss_clamp(x, skb);
 +			err = xfrm_outer_mode_output(x, skb);
 +			if (err) {
 +				XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTSTATEMODEERROR);
@@ -1074,7 +1328,7 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
  		err = xfrm_skb_check_space(skb);
  		if (err) {
  			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTERROR);
-@@ -561,6 +670,9 @@ resume:
+@@ -563,6 +791,9 @@
  			goto error_nolock;
  		}
  
@@ -1084,7 +1338,7 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
  		dst = skb_dst_pop(skb);
  		if (!dst) {
  			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTERROR);
-@@ -571,11 +683,42 @@ resume:
+@@ -573,11 +804,42 @@
  		x = dst->xfrm;
  	} while (x && !(x->outer_mode.flags & XFRM_MODE_FLAG_TUNNEL));
  
@@ -1127,7 +1381,7 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
  	kfree_skb(skb);
  out:
  	return err;
-@@ -807,8 +950,16 @@ int xfrm_output(struct sock *sk, struct sk_buff *skb)
+@@ -813,8 +1075,16 @@
  		if (x->xso.dev && x->xso.dev->features & NETIF_F_HW_ESP_TX_CSUM)
  			goto out;
  	} else {
@@ -1144,12 +1398,12 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
  	}
  
  	if (skb->ip_summed == CHECKSUM_PARTIAL) {
-@@ -825,20 +976,29 @@ out:
+@@ -831,20 +1101,29 @@
  }
  EXPORT_SYMBOL_GPL(xfrm_output);
  
--static int xfrm4_tunnel_check_size(struct sk_buff *skb)
-+static int xfrm4_tunnel_check_size(struct xfrm_state *x, struct sk_buff *skb)
+-int xfrm4_tunnel_check_size(struct sk_buff *skb)
++int xfrm4_tunnel_check_size(struct xfrm_state *x, struct sk_buff *skb)
  {
  	int mtu, ret = 0;
 +	bool native_offload = false;
@@ -1178,7 +1432,7 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
  		skb->protocol = htons(ETH_P_IP);
  
  		if (skb->sk && sk_fullsock(skb->sk))
-@@ -862,10 +1022,14 @@ static int xfrm4_extract_output(struct xfrm_state *x, struct sk_buff *skb)
+@@ -869,10 +1148,14 @@
  		return -EAFNOSUPPORT;
  	}
  
@@ -1194,23 +1448,23 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
  	XFRM_MODE_SKB_CB(skb)->protocol = ip_hdr(skb)->protocol;
  
  	xfrm4_extract_header(skb);
-@@ -873,22 +1037,31 @@ static int xfrm4_extract_output(struct xfrm_state *x, struct sk_buff *skb)
+@@ -880,22 +1163,31 @@
  }
  
  #if IS_ENABLED(CONFIG_IPV6)
--static int xfrm6_tunnel_check_size(struct sk_buff *skb)
-+static int xfrm6_tunnel_check_size(struct xfrm_state *x, struct sk_buff *skb)
+-int xfrm6_tunnel_check_size(struct sk_buff *skb)
++int xfrm6_tunnel_check_size(struct xfrm_state *x, struct sk_buff *skb)
  {
  	int mtu, ret = 0;
  	struct dst_entry *dst = skb_dst(skb);
  	struct sock *sk = skb_to_full_sk(skb);
 +	bool native_offload = false;
- 
--	if (skb->ignore_df)
++
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
 +	native_offload = x->offloaded;
 +#endif
-+
+ 
+-	if (skb->ignore_df)
 +	if (!native_offload && skb->ignore_df)
  		goto out;
  
@@ -1229,7 +1483,7 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
  		skb->dev = dst->dev;
  		skb->protocol = htons(ETH_P_IPV6);
  
-@@ -910,10 +1083,14 @@ static int xfrm6_extract_output(struct xfrm_state *x, struct sk_buff *skb)
+@@ -918,10 +1210,14 @@
  #if IS_ENABLED(CONFIG_IPV6)
  	int err;
  
@@ -1245,10 +1499,9 @@ diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
  	XFRM_MODE_SKB_CB(skb)->protocol = ipv6_hdr(skb)->nexthdr;
  
  	xfrm6_extract_header(skb);
-diff --git a/net/ipv4/ip_output.c b/net/ipv4/ip_output.c
 --- a/net/ipv4/ip_output.c
 +++ b/net/ipv4/ip_output.c
-@@ -114,6 +114,10 @@
+@@ -117,6 +117,10 @@
  
  	skb->protocol = htons(ETH_P_IP);
  
@@ -1259,7 +1512,7 @@ diff --git a/net/ipv4/ip_output.c b/net/ipv4/ip_output.c
  	return nf_hook(NFPROTO_IPV4, NF_INET_LOCAL_OUT,
  		       net, sk, skb, NULL, skb_dst_dev(skb),
  		       dst_output);
-@@ -308,7 +317,11 @@
+@@ -309,7 +313,11 @@
  	if (skb_is_gso(skb))
  		return ip_finish_output_gso(net, sk, skb, mtu);
  
@@ -1272,7 +1525,7 @@ diff --git a/net/ipv4/ip_output.c b/net/ipv4/ip_output.c
  		return ip_fragment(net, sk, skb, mtu, ip_finish_output2);
  
  	return ip_finish_output2(net, sk, skb);
-@@ -434,6 +448,13 @@
+@@ -435,6 +443,13 @@
  	skb->dev = dev;
  	skb->protocol = htons(ETH_P_IP);
  
@@ -1286,10 +1539,9 @@ diff --git a/net/ipv4/ip_output.c b/net/ipv4/ip_output.c
  	ret_val = NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING,
  				net, sk, skb, indev, dev,
  				ip_finish_output,
-diff --git a/net/ipv6/ip6_output.c b/net/ipv6/ip6_output.c
 --- a/net/ipv6/ip6_output.c
 +++ b/net/ipv6/ip6_output.c
-@@ -208,8 +208,12 @@
+@@ -202,8 +202,12 @@
  	if (skb_is_gso(skb))
  		return ip6_finish_output_gso(net, sk, skb, mtu);
  
@@ -1304,22 +1556,24 @@ diff --git a/net/ipv6/ip6_output.c b/net/ipv6/ip6_output.c
  		return ip6_fragment(net, sk, skb, ip6_finish_output2);
  
  	return ip6_finish_output2(net, sk, skb);
-@@ -244,6 +248,11 @@
+@@ -244,6 +248,14 @@
  		return 0;
  	}
  
 +#if defined(CONFIG_INET6_IPSEC_OFFLOAD)
-+	if (skb->ipsec_offload)
-+		return ip6_finish_output(net, sk, skb);
++	if (skb->ipsec_offload) {
++		ret = ip6_finish_output(net, sk, skb);
++		rcu_read_unlock();
++		return ret;
++	}
 +#endif
 +
- 	return NF_HOOK_COND(NFPROTO_IPV6, NF_INET_POST_ROUTING,
- 			    net, sk, skb, indev, dev,
- 			    ip6_finish_output,
-diff --git a/net/ipv6/output_core.c b/net/ipv6/output_core.c
+ 	ret = NF_HOOK_COND(NFPROTO_IPV6, NF_INET_POST_ROUTING,
+ 			   net, sk, skb, indev, dev,
+ 			   ip6_finish_output,
 --- a/net/ipv6/output_core.c
 +++ b/net/ipv6/output_core.c
-@@ -139,6 +139,10 @@
+@@ -142,6 +142,10 @@
  
  	skb->protocol = htons(ETH_P_IPV6);
  
@@ -1328,9 +1582,8 @@ diff --git a/net/ipv6/output_core.c b/net/ipv6/output_core.c
 +		return dst_output(net, sk, skb);
 +#endif
  	return nf_hook(NFPROTO_IPV6, NF_INET_LOCAL_OUT,
- 		       net, sk, skb, NULL, skb_dst(skb)->dev,
+ 		       net, sk, skb, NULL, skb_dst_dev(skb),
  		       dst_output);
-diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
 --- a/net/xfrm/xfrm_state.c
 +++ b/net/xfrm/xfrm_state.c
 @@ -27,6 +27,7 @@
@@ -1461,17 +1714,17 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  
  static DEFINE_SPINLOCK(xfrm_state_afinfo_lock);
  static struct xfrm_state_afinfo __rcu *xfrm_state_afinfo[NPROTO];
-@@ -682,6 +741,9 @@
+@@ -744,6 +803,9 @@
  		INIT_HLIST_NODE(&x->bysrc);
  		INIT_HLIST_NODE(&x->byspi);
  		INIT_HLIST_NODE(&x->byseq);
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
 +		INIT_HLIST_NODE(&x->byh);
 +#endif
- 		hrtimer_init(&x->mtimer, CLOCK_BOOTTIME, HRTIMER_MODE_ABS_SOFT);
- 		x->mtimer.function = xfrm_timer_handler;
+ 		hrtimer_setup(&x->mtimer, xfrm_timer_handler, CLOCK_BOOTTIME,
+ 			      HRTIMER_MODE_ABS_SOFT);
  		timer_setup(&x->rtimer, xfrm_replay_timer_handler, 0);
-@@ -692,6 +754,12 @@
+@@ -754,6 +816,12 @@
  		x->lft.hard_packet_limit = XFRM_INF;
  		x->replay_maxage = 0;
  		x->replay_maxdiff = 0;
@@ -1483,8 +1736,8 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
 +#endif
  		x->pcpu_num = UINT_MAX;
  		spin_lock_init(&x->lock);
- 	}
-@@ -767,6 +835,12 @@
+ 		x->mode_data = NULL;
+@@ -829,6 +897,12 @@
  
  		if (!hlist_unhashed(&x->byspi))
  			hlist_del_init_rcu(&x->byspi);
@@ -1497,7 +1750,7 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  		net->xfrm.state_num--;
  		xfrm_nat_keepalive_state_updated(x);
  		spin_unlock(&net->xfrm.xfrm_state_lock);
-@@ -1517,6 +1591,7 @@
+@@ -1582,6 +1656,7 @@
  						  net->xfrm.state_byseq + h,
  						  x->xso.type);
  			}
@@ -1505,7 +1758,7 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  			x->lft.hard_add_expires_seconds = net->xfrm.sysctl_acq_expires;
  			hrtimer_start(&x->mtimer,
  				      ktime_set(net->xfrm.sysctl_acq_expires, 0),
-@@ -1686,6 +1761,7 @@
+@@ -1751,6 +1826,7 @@
  		XFRM_STATE_INSERT(byseq, &x->byseq, net->xfrm.state_byseq + h,
  				  x->xso.type);
  	}
@@ -1513,7 +1766,7 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  
  	hrtimer_start(&x->mtimer, ktime_set(1, 0), HRTIMER_MODE_REL_SOFT);
  	if (x->replay_maxage)
-@@ -1708,6 +1784,9 @@
+@@ -1773,6 +1849,9 @@
  	u32 mark = xnew->mark.v & xnew->mark.m;
  	u32 if_id = xnew->if_id;
  	u32 cpu_id = xnew->pcpu_num;
@@ -1523,7 +1776,7 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  
  	h = xfrm_dst_hash(net, &xnew->id.daddr, &xnew->props.saddr, reqid, family);
  	hlist_for_each_entry(x, net->xfrm.state_bydst+h, bydst) {
-@@ -1717,9 +1796,17 @@
+@@ -1782,9 +1861,17 @@
  		    x->pcpu_num		== cpu_id &&
  		    (mark & x->mark.m) == x->mark.v &&
  		    xfrm_addr_equal(&x->id.daddr, &xnew->id.daddr, family) &&
@@ -1542,7 +1795,7 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  }
  
  void xfrm_state_insert(struct xfrm_state *x)
-@@ -1808,6 +1895,7 @@
+@@ -1873,6 +1960,7 @@
  		h = xfrm_src_hash(net, daddr, saddr, family);
  		XFRM_STATE_INSERT(bysrc, &x->bysrc, net->xfrm.state_bysrc + h,
  				  x->xso.type);
@@ -1550,7 +1803,7 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  
  		net->xfrm.state_num++;
  
-@@ -2264,6 +2352,30 @@
+@@ -2353,6 +2441,30 @@
  }
  EXPORT_SYMBOL(xfrm_state_lookup_byaddr);
  
@@ -1581,7 +1834,7 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  struct xfrm_state *
  xfrm_find_acq(struct net *net, const struct xfrm_mark *mark, u8 mode, u32 reqid,
  	      u32 if_id, u32 pcpu_num, u8 proto, const xfrm_address_t *daddr,
-@@ -2513,6 +2625,7 @@
+@@ -2604,6 +2716,7 @@
  			x->id.spi = newspi;
  			h = xfrm_spi_hash(net, &x->id.daddr, newspi, x->id.proto, x->props.family);
  			XFRM_STATE_INSERT(byspi, &x->byspi, net->xfrm.state_byspi + h, x->xso.type);
@@ -1589,7 +1842,7 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  			spin_unlock_bh(&net->xfrm.xfrm_state_lock);
  			err = 0;
  			goto unlock;
-@@ -3185,6 +3298,12 @@
+@@ -3294,6 +3407,12 @@
  	net->xfrm.state_byseq = xfrm_hash_alloc(sz);
  	if (!net->xfrm.state_byseq)
  		goto out_byseq;
@@ -1602,7 +1855,7 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  
  	net->xfrm.state_cache_input = alloc_percpu(struct hlist_head);
  	if (!net->xfrm.state_cache_input)
-@@ -3200,6 +3319,10 @@
+@@ -3309,6 +3428,10 @@
  	return 0;
  
  out_state_cache_input:
@@ -1613,9 +1866,9 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  	xfrm_hash_free(net->xfrm.state_byseq, sz);
  out_byseq:
  	xfrm_hash_free(net->xfrm.state_byspi, sz);
-@@ -3230,6 +3353,10 @@
+@@ -3343,6 +3466,10 @@
+ 	xfrm_hash_free(net->xfrm.state_byspi, sz);
  	xfrm_hash_free(net->xfrm.state_bysrc, sz);
- 	WARN_ON(!hlist_empty(net->xfrm.state_bydst));
  	xfrm_hash_free(net->xfrm.state_bydst, sz);
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
 +	WARN_ON(!hlist_empty(net->xfrm.state_byh));
@@ -1624,10 +1877,9 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  	free_percpu(net->xfrm.state_cache_input);
  }
  
-diff --git a/net/xfrm/xfrm_user.c b/net/xfrm/xfrm_user.c
 --- a/net/xfrm/xfrm_user.c
 +++ b/net/xfrm/xfrm_user.c
-@@ -1070,6 +1070,10 @@
+@@ -1131,6 +1131,10 @@
  	if (x->xso.dev)
  		xfrm_dev_state_update_stats(x);
  	memcpy(&p->curlft, &x->curlft, sizeof(p->curlft));
@@ -1638,10 +1890,9 @@ diff --git a/net/xfrm/xfrm_user.c b/net/xfrm/xfrm_user.c
  	put_unaligned(x->stats.replay_window, &p->stats.replay_window);
  	put_unaligned(x->stats.replay, &p->stats.replay);
  	put_unaligned(x->stats.integrity_failed, &p->stats.integrity_failed);
-diff --git a/drivers/crypto/caam/pdb.h b/drivers/crypto/caam/pdb.h
 --- a/drivers/crypto/caam/pdb.h
 +++ b/drivers/crypto/caam/pdb.h
-@@ -145,7 +145,7 @@ struct ipsec_encap_pdb {
+@@ -145,7 +145,7 @@
  	u32 spi;
  	u32 ip_hdr_len;
  	u32 ip_hdr[];
@@ -1650,7 +1901,7 @@ diff --git a/drivers/crypto/caam/pdb.h b/drivers/crypto/caam/pdb.h
  
  /**
   * ipsec_decap_cbc - PDB part for IPsec CBC decapsulation
-@@ -153,7 +153,7 @@ struct ipsec_encap_pdb {
+@@ -153,7 +153,7 @@
   */
  struct ipsec_decap_cbc {
  	u32 rsvd[2];
@@ -1659,7 +1910,7 @@ diff --git a/drivers/crypto/caam/pdb.h b/drivers/crypto/caam/pdb.h
  
  /**
   * ipsec_decap_ctr - PDB part for IPsec CTR decapsulation
-@@ -163,7 +163,7 @@ struct ipsec_decap_cbc {
+@@ -163,7 +163,7 @@
  struct ipsec_decap_ctr {
  	u8 ctr_nonce[4];
  	u32 ctr_initial;
@@ -1668,7 +1919,7 @@ diff --git a/drivers/crypto/caam/pdb.h b/drivers/crypto/caam/pdb.h
  
  /**
   * ipsec_decap_ccm - PDB part for IPsec CCM decapsulation
-@@ -177,7 +177,7 @@ struct ipsec_decap_ctr {
+@@ -177,7 +177,7 @@
  struct ipsec_decap_ccm {
  	u8 salt[4];
  	u32 ccm_opt;
@@ -1677,7 +1928,7 @@ diff --git a/drivers/crypto/caam/pdb.h b/drivers/crypto/caam/pdb.h
  
  /**
   * ipsec_decap_gcm - PDB part for IPsec GCN decapsulation
-@@ -187,7 +187,7 @@ struct ipsec_decap_ccm {
+@@ -187,7 +187,7 @@
  struct ipsec_decap_gcm {
  	u8 salt[4];
  	u32 resvd;
@@ -1686,7 +1937,7 @@ diff --git a/drivers/crypto/caam/pdb.h b/drivers/crypto/caam/pdb.h
  
  /**
   * ipsec_decap_pdb - PDB for IPsec decapsulation
-@@ -211,7 +211,7 @@ struct ipsec_decap_pdb {
+@@ -211,7 +211,7 @@
  	u32 seq_num_ext_hi;
  	u32 seq_num;
  	__be32 anti_replay[4];
@@ -1695,283 +1946,22 @@ diff --git a/drivers/crypto/caam/pdb.h b/drivers/crypto/caam/pdb.h
  
  /*
   * IPSec ESP Datapath Protocol Override Register (DPOVRD)
-diff --git a/net/xfrm/xfrm_input.c b/net/xfrm/xfrm_input.c
---- a/net/xfrm/xfrm_input.c
-+++ b/net/xfrm/xfrm_input.c
-@@ -15,12 +15,16 @@
- #include <linux/module.h>
- #include <linux/netdevice.h>
- #include <linux/percpu.h>
-+#include <linux/tcp.h>
-+#include <net/checksum.h>
- #include <net/dst.h>
- #include <net/ip.h>
-+#include <net/tcp.h>
- #include <net/xfrm.h>
- #include <net/ip_tunnels.h>
- #include <net/ip6_tunnel.h>
- #include <net/dst_metadata.h>
-+#include <net/ipv6.h>
- #include <net/hotdata.h>
- 
- #include "xfrm_inout.h"
-@@ -46,6 +50,114 @@
- 
- #if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
- extern int dpaa_submit_inb_pkt_to_SEC(struct sk_buff *skb, uint16_t sagd);
-+
-+static unsigned int xfrm_ipsec_native_inner_mtu(struct xfrm_state *x,
-+						struct sk_buff *skb)
-+{
-+	struct dst_entry *dst = skb_dst(skb);
-+
-+	return dst ? xfrm_state_mtu(x, dst_mtu(dst)) : 0;
-+}
-+
-+static void xfrm_ipsec_native_mss_clamp(struct xfrm_state *x,
-+					struct sk_buff *skb)
-+{
-+	unsigned int mtu = xfrm_ipsec_native_inner_mtu(x, skb);
-+	unsigned int tcp_hdrlen;
-+	unsigned int thoff;
-+	struct tcphdr *th;
-+	u16 newmss;
-+	u8 *opt;
-+	int i;
-+
-+	if (!mtu)
-+		return;
-+
-+	switch (skb->protocol) {
-+	case htons(ETH_P_IP):
-+		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
-+			return;
-+		if (ip_hdr(skb)->protocol != IPPROTO_TCP || ip_is_fragment(ip_hdr(skb)))
-+			return;
-+		thoff = ip_hdrlen(skb);
-+		break;
-+#if IS_ENABLED(CONFIG_IPV6)
-+	case htons(ETH_P_IPV6): {
-+		__be16 frag_off;
-+		u8 nexthdr;
-+		int offset;
-+
-+		if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
-+			return;
-+
-+		nexthdr = ipv6_hdr(skb)->nexthdr;
-+		offset = ipv6_skip_exthdr(skb, sizeof(struct ipv6hdr),
-+					  &nexthdr, &frag_off);
-+		if (offset < 0 || nexthdr != IPPROTO_TCP || frag_off)
-+			return;
-+
-+		thoff = offset;
-+		break;
-+	}
-+#endif
-+	default:
-+		return;
-+	}
-+
-+	if (!pskb_may_pull(skb, thoff + sizeof(struct tcphdr)))
-+		return;
-+	if (skb_ensure_writable(skb, thoff + sizeof(struct tcphdr)))
-+		return;
-+
-+	th = (struct tcphdr *)(skb_network_header(skb) + thoff);
-+	if (!th->syn || th->rst)
-+		return;
-+
-+	tcp_hdrlen = th->doff * 4;
-+	if (tcp_hdrlen < sizeof(struct tcphdr))
-+		return;
-+	if (!pskb_may_pull(skb, thoff + tcp_hdrlen))
-+		return;
-+	if (skb_ensure_writable(skb, thoff + tcp_hdrlen))
-+		return;
-+
-+	th = (struct tcphdr *)(skb_network_header(skb) + thoff);
-+	if (mtu <= thoff + tcp_hdrlen || mtu - thoff - tcp_hdrlen > U16_MAX)
-+		return;
-+	newmss = mtu - thoff - tcp_hdrlen;
-+	opt = (u8 *)th;
-+
-+	for (i = sizeof(struct tcphdr); i < tcp_hdrlen;) {
-+		unsigned int optlen;
-+		u16 oldmss;
-+
-+		if (opt[i] == TCPOPT_EOL)
-+			break;
-+		if (opt[i] == TCPOPT_NOP) {
-+			i++;
-+			continue;
-+		}
-+		if (i + 1 >= tcp_hdrlen)
-+			break;
-+
-+		optlen = opt[i + 1];
-+		if (optlen < 2 || i + optlen > tcp_hdrlen)
-+			break;
-+
-+		if (opt[i] == TCPOPT_MSS && optlen == TCPOLEN_MSS) {
-+			oldmss = (opt[i + 2] << 8) | opt[i + 3];
-+			if (oldmss <= newmss)
-+				return;
-+			opt[i + 2] = newmss >> 8;
-+			opt[i + 3] = newmss & 0xff;
-+			inet_proto_csum_replace2(&th->check, skb,
-+						 htons(oldmss), htons(newmss),
-+						 false);
-+			return;
-+		}
-+		i += optlen;
-+	}
-+}
- #endif
- 
- static DEFINE_SPINLOCK(xfrm_input_afinfo_lock);
-@@ -699,6 +811,11 @@
- 			goto drop;
- 		}
- 
-+#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
-+		if (x->offloaded)
-+			xfrm_ipsec_native_mss_clamp(x, skb);
-+#endif
-+
- 		if (x->outer_mode.flags & XFRM_MODE_FLAG_TUNNEL) {
- 			decaps = 1;
- 			break;
-diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
---- a/net/xfrm/xfrm_output.c
-+++ b/net/xfrm/xfrm_output.c
-@@ -14,10 +14,14 @@
- #include <linux/spinlock.h>
- #include <linux/tcp.h>
- #include <linux/udp.h>
-+#include <net/checksum.h>
- #include <net/dst.h>
- #include <net/gso.h>
- #include <net/icmp.h>
- #include <net/inet_ecn.h>
-+#include <net/ip.h>
-+#include <net/ipv6.h>
-+#include <net/tcp.h>
- #include <net/xfrm.h>
- 
- #if IS_ENABLED(CONFIG_IPV6)
-@@ -52,6 +56,106 @@
- 	return dst ? dst_mtu(dst) : 0;
- }
- 
-+static void xfrm_ipsec_native_mss_clamp(struct xfrm_state *x,
-+					struct sk_buff *skb)
-+{
-+	unsigned int mtu = xfrm_ipsec_native_mtu(x, skb);
-+	unsigned int tcp_hdrlen;
-+	unsigned int thoff;
-+	struct tcphdr *th;
-+	u16 newmss;
-+	u8 *opt;
-+	int i;
-+
-+	if (!mtu)
-+		return;
-+
-+	switch (skb->protocol) {
-+	case htons(ETH_P_IP):
-+		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
-+			return;
-+		if (ip_hdr(skb)->protocol != IPPROTO_TCP || ip_is_fragment(ip_hdr(skb)))
-+			return;
-+		thoff = ip_hdrlen(skb);
-+		break;
-+#if IS_ENABLED(CONFIG_IPV6)
-+	case htons(ETH_P_IPV6): {
-+		__be16 frag_off;
-+		u8 nexthdr;
-+		int offset;
-+
-+		if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
-+			return;
-+
-+		nexthdr = ipv6_hdr(skb)->nexthdr;
-+		offset = ipv6_skip_exthdr(skb, sizeof(struct ipv6hdr),
-+					  &nexthdr, &frag_off);
-+		if (offset < 0 || nexthdr != IPPROTO_TCP || frag_off)
-+			return;
-+
-+		thoff = offset;
-+		break;
-+	}
-+#endif
-+	default:
-+		return;
-+	}
-+
-+	if (!pskb_may_pull(skb, thoff + sizeof(struct tcphdr)))
-+		return;
-+	if (skb_ensure_writable(skb, thoff + sizeof(struct tcphdr)))
-+		return;
-+
-+	th = (struct tcphdr *)(skb_network_header(skb) + thoff);
-+	if (!th->syn || th->rst)
-+		return;
-+
-+	tcp_hdrlen = th->doff * 4;
-+	if (tcp_hdrlen < sizeof(struct tcphdr))
-+		return;
-+	if (!pskb_may_pull(skb, thoff + tcp_hdrlen))
-+		return;
-+	if (skb_ensure_writable(skb, thoff + tcp_hdrlen))
-+		return;
-+
-+	th = (struct tcphdr *)(skb_network_header(skb) + thoff);
-+	if (mtu <= thoff + tcp_hdrlen || mtu - thoff - tcp_hdrlen > U16_MAX)
-+		return;
-+	newmss = mtu - thoff - tcp_hdrlen;
-+	opt = (u8 *)th;
-+
-+	for (i = sizeof(struct tcphdr); i < tcp_hdrlen;) {
-+		unsigned int optlen;
-+		u16 oldmss;
-+
-+		if (opt[i] == TCPOPT_EOL)
-+			break;
-+		if (opt[i] == TCPOPT_NOP) {
-+			i++;
-+			continue;
-+		}
-+		if (i + 1 >= tcp_hdrlen)
-+			break;
-+
-+		optlen = opt[i + 1];
-+		if (optlen < 2 || i + optlen > tcp_hdrlen)
-+			break;
-+
-+		if (opt[i] == TCPOPT_MSS && optlen == TCPOLEN_MSS) {
-+			oldmss = (opt[i + 2] << 8) | opt[i + 3];
-+			if (oldmss <= newmss)
-+				return;
-+			opt[i + 2] = newmss >> 8;
-+			opt[i + 3] = newmss & 0xff;
-+			inet_proto_csum_replace2(&th->check, skb,
-+						 htons(oldmss), htons(newmss),
-+						 false);
-+			return;
-+		}
-+		i += optlen;
-+	}
-+}
-+
- static bool xfrm_ipsec_native_gso_prepare(struct xfrm_state *x,
- 					  struct sk_buff *skb)
- {
-@@ -597,6 +701,7 @@
- 			skb->ipsec_sa_handle = x->handle;
- 			skb->ipsec_xfrm_dir |= 1 << XFRM_POLICY_OUT;
- 
-+			xfrm_ipsec_native_mss_clamp(x, skb);
- 			err = xfrm_outer_mode_output(x, skb);
- 			if (err) {
- 				XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTSTATEMODEERROR);
+--- a/net/xfrm/xfrm_device.c
++++ b/net/xfrm/xfrm_device.c
+@@ -443,14 +443,14 @@
+ 		/* Check for IPv4 options */
+ 		if (ip_hdr(skb)->ihl != 5)
+ 			return false;
+-		if (check_tunnel_size && xfrm4_tunnel_check_size(skb))
++		if (check_tunnel_size && xfrm4_tunnel_check_size(x, skb))
+ 			return false;
+ 		break;
+ 	case AF_INET6:
+ 		/* Check for IPv6 extensions */
+ 		if (ipv6_ext_hdr(ipv6_hdr(skb)->nexthdr))
+ 			return false;
+-		if (check_tunnel_size && xfrm6_tunnel_check_size(skb))
++		if (check_tunnel_size && xfrm6_tunnel_check_size(x, skb))
+ 			return false;
+ 		break;
+ 	default:
