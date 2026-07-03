@@ -1,0 +1,25 @@
+Port to Linux 6.18 investigation: dpa_app_wrapper (package/network/ask-dpa-app/files/dpa_app_wrapper)
+already supports capturing dpa_app's stdout/stderr to /tmp/dpa_app.log
+when ASK_DPA_APP_DEBUG is set, but the kernel only ever launches it via
+call_usermodehelper() with a fixed envp[] that doesn't set that variable.
+So at real boot, dpa_app's output (including libfmc's own per-scheme PCD
+error detail) is silently discarded -- nothing reaches dmesg/logread, and
+no /tmp/dpa_app.log is ever created.
+
+Add ASK_DPA_APP_DEBUG=1 to the usermode helper's envp[] so the wrapper's
+existing logging path is exercised on every real boot. Diagnostic-only:
+does not change any FMan/PCD programming behavior.
+
+--- a/cdx-5.03.1/cdx_main.c
++++ b/cdx-5.03.1/cdx_main.c
+@@ -85,6 +85,10 @@
+ 		"HOME=/",
+ 		"TERM=linux",
+ 		"PATH=/sbin:/usr/sbin:/bin:/usr/bin",
++		/* Route dpa_app's real stdout/stderr to /tmp/dpa_app.log via
++		 * dpa_app_wrapper, which is otherwise silently discarded by
++		 * call_usermodehelper. */
++		"ASK_DPA_APP_DEBUG=1",
+ 		NULL
+ 	};
+ 	/*
