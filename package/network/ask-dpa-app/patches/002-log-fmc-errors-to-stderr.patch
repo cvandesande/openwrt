@@ -1,0 +1,27 @@
+Port to Linux 6.18 investigation: dpa_app never raises libfmc's own log
+level above the default NONE, so libfmc's fmc_log_write() calls at LOG_ERR
+(e.g. "Invocation of FM_PCD_KgSchemeSet for %s failed" in fmc_exec.c) are
+silently dropped at boot. All we get today is dpa_app's own generic
+"unable to execute the FMC Model", with no indication of which scheme(s)
+actually failed inside libfmc.
+
+Raise the log level to LOG_ERR at the top of dpa_init(), before
+fmc_compile()/fmc_execute() run, so libfmc's own error detail reaches
+stderr (captured by the dpa_app_wrapper script under
+ASK_DPA_APP_DEBUG=1). This is diagnostic-only: it does not change any
+FMan/PCD programming behavior, just what gets logged on failure.
+
+--- a/dpa_app-4.03.0/dpa.c
++++ b/dpa_app-4.03.0/dpa.c
+@@ -756,6 +756,11 @@
+ 	char devname[64];
+ 	int retval;
+
++	/* Surface libfmc's own per-call error detail (e.g. which PCD
++	 * scheme/port failed), which is otherwise dropped at the default
++	 * log level of NONE. */
++	fmc_log(LOG_ERR);
++
+ 	//open cdx control device
+         sprintf(devname, "/dev/%s", CDX_CTRL_CDEVNAME);
+         cdx_dev_handle = open(devname, O_RDWR);
