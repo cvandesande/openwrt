@@ -267,11 +267,20 @@ jobs:
               cut -d ' ' -f1
           }
 
-          config_hash="$(sha256sum .config | cut -d ' ' -f1)"
+          # Exclude release-identity fields (unique per release/revision by
+          # design) so host/hostpkg cache keys don't needlessly miss on every
+          # mono_revision bump even though those tools don't depend on them.
+          config_hash="$(grep -Ev '^CONFIG_VERSION_(NUMBER|CODE|DIST)=' .config | sha256sum | cut -d ' ' -f1)"
           feed_hash="$(feed_revision_hash)"
           host_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include scripts tools)"
           hostpkg_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include package)"
-          toolchain_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include toolchain target/linux/generic/kernel-* target/linux/generic/backport-* target/linux/generic/pending-* target/linux/generic/hack-* target/linux/layerscape/Makefile target/linux/layerscape/armv8_64b/target.mk target/linux/layerscape/config-* target/linux/layerscape/armv8_64b/config-* target/linux/layerscape/patches-*)"
+          # Scoped to what actually affects the cross-compiler itself, not
+          # kernel patches/config -- ccache is content-addressed internally,
+          # so it stays correct across kernel-patch-only changes; this hash only
+          # picks the cache-warm-start boundary, and kernel patches (ASK or
+          # otherwise) changing shouldn't cold-start the ccache for the other
+          # ~330 non-kernel packages too.
+          toolchain_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include toolchain)"
           toolchain_config_hash="$(toolchain_config_hash)"
           ccache_family="${CACHE_PREFIX}-ccache-${CACHE_EPOCH}-absdir-v1-${toolchain_tree_hash}-${toolchain_config_hash}"
           ccache_week="$(date -u +%G-W%V)"
