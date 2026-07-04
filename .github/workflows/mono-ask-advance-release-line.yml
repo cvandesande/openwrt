@@ -1,0 +1,765 @@
+name: Advance Mono ASK Release Line
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_line:
+        description: "Existing Mono stable line to advance, matching its mono-base-<line>/mono-oss-<line>/mono-ask-<line> tracking branch suffix (e.g. 25.12)."
+        required: true
+        default: "25.12"
+        type: string
+      upstream_tag:
+        description: "New official upstream OpenWrt point-release tag to advance this line to (e.g. v25.12.6)."
+        required: true
+        type: string
+      mono_revision:
+        description: "Mono release revision suffix. Use r2 rather than overwriting an existing r1."
+        required: true
+        default: "r1"
+        type: string
+      mono_number:
+        description: "Image release suffix embedded in /etc/openwrt_release."
+        required: true
+        default: "mono1"
+        type: string
+      cache_epoch:
+        description: "Optional cache epoch override. Leave empty to use MONO_RELEASE_CACHE_EPOCH or v1."
+        required: false
+        type: string
+      cold_build:
+        description: "Skip restoring and saving caches for this run."
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mono-ask-advance-release-line-${{ inputs.release_line }}-${{ inputs.upstream_tag }}-${{ inputs.mono_revision }}
+  cancel-in-progress: false
+
+env:
+  CACHE_EPOCH: ${{ inputs.cache_epoch || vars.MONO_RELEASE_CACHE_EPOCH || 'v1' }}
+  CANDIDATE_BUNDLE: mono-ask-release-candidate.bundle
+  CANDIDATE_ARTIFACT: mono-ask-release-candidate
+  RELEASE_ARTIFACT: mono-ask-release-payload
+
+jobs:
+  prepare-candidate:
+    name: Advance release line refs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      upstream_tag: ${{ steps.prepare.outputs.upstream_tag }}
+      upstream_sha: ${{ steps.prepare.outputs.upstream_sha }}
+      release_version: ${{ steps.prepare.outputs.release_version }}
+      release_tag: ${{ steps.prepare.outputs.release_tag }}
+      version_number: ${{ steps.prepare.outputs.version_number }}
+      version_code: ${{ steps.prepare.outputs.version_code }}
+      base_branch: ${{ steps.prepare.outputs.base_branch }}
+      oss_branch: ${{ steps.prepare.outputs.oss_branch }}
+      ask_branch: ${{ steps.prepare.outputs.ask_branch }}
+      base_sha: ${{ steps.prepare.outputs.base_sha }}
+      oss_sha: ${{ steps.prepare.outputs.oss_sha }}
+      ask_sha: ${{ steps.prepare.outputs.ask_sha }}
+      stable_base_branch: ${{ steps.prepare.outputs.stable_base_branch }}
+      stable_oss_branch: ${{ steps.prepare.outputs.stable_oss_branch }}
+      stable_ask_branch: ${{ steps.prepare.outputs.stable_ask_branch }}
+    steps:
+      - name: Check out workflow branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
+
+      - name: Verify external actions are SHA pinned
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          set -euo pipefail
+          failures=0
+          while IFS= read -r ref; do
+            case "$ref" in
+              ./*|docker://*) continue ;;
+            esac
+
+            if ! printf '%s\n' "$ref" | grep -Eq '@[0-9a-f]{40}$'; then
+              printf '::error::External action is not pinned to a full commit SHA: %s\n' "$ref" >&2
+              failures=1
+            fi
+          done < <(grep -RhoE 'uses:[[:space:]]+[^[:space:]#]+' .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null | awk '{ print $2 }')
+
+          exit "$failures"
+
+      - name: Configure Git identity
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Advance release line refs
+        id: prepare
+        working-directory: ${{ github.workspace }}/source
+        env:
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          MONO_REVISION: ${{ inputs.mono_revision }}
+          MONO_NUMBER: ${{ inputs.mono_number }}
+          WORKFLOW_SOURCE_BRANCH: main
+          STABLE_BASE_BRANCH: mono-base-${{ inputs.release_line }}
+          STABLE_OSS_BRANCH: mono-oss-${{ inputs.release_line }}
+          STABLE_ASK_BRANCH: mono-ask-${{ inputs.release_line }}
+        run: bash .github/workflows/scripts/advance-mono-ask-release-line.sh
+
+      - name: Bundle candidate refs
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          git bundle create "/tmp/${CANDIDATE_BUNDLE}" \
+            "${{ steps.prepare.outputs.base_branch }}" \
+            "${{ steps.prepare.outputs.oss_branch }}" \
+            "${{ steps.prepare.outputs.ask_branch }}"
+          cd /tmp
+          sha256sum "${CANDIDATE_BUNDLE}" | tee "${CANDIDATE_BUNDLE}.sha256"
+
+      - name: Upload candidate bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.CANDIDATE_ARTIFACT }}
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            /tmp/${{ env.CANDIDATE_BUNDLE }}
+            /tmp/${{ env.CANDIDATE_BUNDLE }}.sha256
+
+  build-candidate:
+    name: Build release candidate
+    needs: prepare-candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      candidate_sha: ${{ steps.verify-candidate.outputs.candidate_sha }}
+      image_prefix: ${{ steps.verify-artifacts.outputs.image_prefix }}
+    env:
+      RELEASE_TAG: ${{ needs.prepare-candidate.outputs.release_tag }}
+      VERSION_NUMBER: ${{ needs.prepare-candidate.outputs.version_number }}
+      VERSION_CODE: ${{ needs.prepare-candidate.outputs.version_code }}
+      UPSTREAM_TAG: ${{ needs.prepare-candidate.outputs.upstream_tag }}
+      UPSTREAM_SHA: ${{ needs.prepare-candidate.outputs.upstream_sha }}
+      BASE_BRANCH: ${{ needs.prepare-candidate.outputs.base_branch }}
+      OSS_BRANCH: ${{ needs.prepare-candidate.outputs.oss_branch }}
+      ASK_BRANCH: ${{ needs.prepare-candidate.outputs.ask_branch }}
+      BASE_SHA: ${{ needs.prepare-candidate.outputs.base_sha }}
+      OSS_SHA: ${{ needs.prepare-candidate.outputs.oss_sha }}
+      ASK_SHA: ${{ needs.prepare-candidate.outputs.ask_sha }}
+      CCACHE_DIR: ${{ github.workspace }}/source/.ccache
+    steps:
+      - name: Download candidate bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.CANDIDATE_ARTIFACT }}
+          path: /tmp/mono-ask-release-candidate
+
+      - name: Check out candidate from bundle
+        run: |
+          set -euo pipefail
+          cd /tmp/mono-ask-release-candidate
+          sha256sum -c "${CANDIDATE_BUNDLE}.sha256"
+          git clone "${CANDIDATE_BUNDLE}" "${GITHUB_WORKSPACE}/source"
+          cd "${GITHUB_WORKSPACE}/source"
+          git switch --force-create "$ASK_BRANCH" "origin/$ASK_BRANCH"
+          test "$(git rev-parse HEAD)" = "$ASK_SHA"
+
+      - name: Verify candidate metadata
+        id: verify-candidate
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s\n' "$RELEASE_TAG" | grep -Eq '^mono-ask-v[0-9]+[.][0-9]+[.][0-9]+-r[0-9]+$'; then
+            printf '::error::Unexpected release tag format: %s\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          if ! printf '%s\n' "$VERSION_NUMBER" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+-mono[0-9]+$'; then
+            printf '::error::Unexpected version_number format: %s\n' "$VERSION_NUMBER" >&2
+            exit 1
+          fi
+
+          if [ "$VERSION_CODE" != "$RELEASE_TAG" ]; then
+            printf '::error::version_code (%s) must match release_tag (%s)\n' "$VERSION_CODE" "$RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          tag_version="${RELEASE_TAG#mono-ask-v}"
+          tag_version="${tag_version%-r*}"
+          image_version="${VERSION_NUMBER%-mono*}"
+          if [ "$image_version" != "$tag_version" ]; then
+            printf '::error::version_number (%s) must use release tag version %s\n' "$VERSION_NUMBER" "$tag_version" >&2
+            exit 1
+          fi
+
+          candidate_sha="$(git rev-parse HEAD)"
+          if [ "$candidate_sha" != "$ASK_SHA" ]; then
+            printf '::error::Checked-out HEAD %s does not match candidate %s\n' "$candidate_sha" "$ASK_SHA" >&2
+            exit 1
+          fi
+
+          {
+            printf 'candidate_sha=%s\n' "$candidate_sha"
+            printf 'short_candidate_sha=%s\n' "$(git rev-parse --short=12 HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Free runner disk space
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Install OpenWrt build dependencies
+        id: install-deps
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ccache \
+            clang \
+            e2fsprogs \
+            flex \
+            bison \
+            g++ \
+            gawk \
+            gcc-multilib \
+            g++-multilib \
+            gettext \
+            git \
+            libelf-dev \
+            libncurses5-dev \
+            libssl-dev \
+            python3 \
+            python3-setuptools \
+            rsync \
+            swig \
+            unzip \
+            zlib1g-dev \
+            file \
+            wget
+
+      - name: Restore dl cache
+        id: restore-dl
+        if: ${{ inputs.cold_build != true }}
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: source/dl
+          key: ${{ runner.os }}-${{ runner.arch }}-mono-release-dl-${{ env.CACHE_EPOCH }}-${{ hashFiles('source/feeds.conf.default', 'source/feeds.conf') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-mono-release-dl-${{ env.CACHE_EPOCH }}-
+
+      - name: Update feeds
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure Mono Gateway DK release build
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          set -euo pipefail
+
+          cp config/mono_gateway-dk.seed .config
+          {
+            printf 'CONFIG_IMAGEOPT=y\n'
+            printf 'CONFIG_VERSIONOPT=y\n'
+            printf 'CONFIG_VERSION_DIST="Mono OpenWrt"\n'
+            printf 'CONFIG_VERSION_NUMBER="%s"\n' "$VERSION_NUMBER"
+            printf 'CONFIG_VERSION_CODE="%s"\n' "$VERSION_CODE"
+            printf 'CONFIG_DEVEL=y\n'
+            printf 'CONFIG_CCACHE=y\n'
+            printf 'CONFIG_CCACHE_DIR="%s/.ccache"\n' "$PWD"
+            printf 'CONFIG_BUILD_LOG=y\n'
+          } >> .config
+          make defconfig
+
+      - name: Check Mono vendor source hashes
+        working-directory: ${{ github.workspace }}/source
+        run: scripts/mono-check-vendor-hashes.sh
+
+      - name: Compute cache keys
+        id: cache-keys
+        working-directory: ${{ github.workspace }}/source
+        env:
+          CACHE_PREFIX: ${{ runner.os }}-${{ runner.arch }}-mono-release
+        run: |
+          set -euo pipefail
+
+          git_tree_hash() {
+            local path
+            for path in "$@"; do
+              git rev-parse "HEAD:${path}" 2>/dev/null || true
+            done | sha256sum | cut -d ' ' -f1
+          }
+
+          feed_revision_hash() {
+            if [ ! -d feeds ]; then
+              printf 'nofeeds\n'
+              return
+            fi
+
+            find feeds -mindepth 1 -maxdepth 1 -type d -print | sort | while read -r feed; do
+              if [ -d "${feed}/.git" ]; then
+                printf '%s %s\n' "${feed}" "$(git -C "${feed}" rev-parse HEAD)"
+              else
+                printf '%s nogit\n' "${feed}"
+              fi
+            done | sha256sum | cut -d ' ' -f1
+          }
+
+          toolchain_config_hash() {
+            grep -E '^(# )?CONFIG_(TARGET_layerscape|TARGET_(BOARD|SUBTARGET|ARCH_PACKAGES|OPTIMIZATION)|aarch64|CPU_TYPE|SOFT_FLOAT|GCC_|BINUTILS_|USE_MUSL|USE_GLIBC|LIBC|MUSL_|GDB|NASM|USE_MOLD|EXTERNAL_TOOLCHAIN|KERNEL_GIT_|EXTERNAL_KERNEL_TREE)' .config |
+              sort |
+              sha256sum |
+              cut -d ' ' -f1
+          }
+
+          config_hash="$(sha256sum .config | cut -d ' ' -f1)"
+          feed_hash="$(feed_revision_hash)"
+          host_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include scripts tools)"
+          hostpkg_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include package)"
+          toolchain_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include toolchain target/linux/generic/kernel-* target/linux/generic/backport-* target/linux/generic/pending-* target/linux/generic/hack-* target/linux/layerscape/Makefile target/linux/layerscape/armv8_64b/target.mk target/linux/layerscape/config-* target/linux/layerscape/armv8_64b/config-* target/linux/layerscape/patches-*)"
+          toolchain_config_hash="$(toolchain_config_hash)"
+          ccache_family="${CACHE_PREFIX}-ccache-${CACHE_EPOCH}-absdir-v1-${toolchain_tree_hash}-${toolchain_config_hash}"
+          ccache_week="$(date -u +%G-W%V)"
+
+          {
+            printf 'ccache_key=%s-week-%s\n' "$ccache_family" "$ccache_week"
+            printf 'ccache_save_key=%s-week-%s\n' "$ccache_family" "$ccache_week"
+            printf 'ccache_restore_family=%s-week-\n' "$ccache_family"
+            printf 'host_key=%s-host-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$host_tree_hash" "$config_hash"
+            printf 'hostpkg_key=%s-hostpkg-%s-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$hostpkg_tree_hash" "$feed_hash" "$config_hash"
+            printf 'toolchain_tree_hash=%s\n' "$toolchain_tree_hash"
+            printf 'toolchain_config_hash=%s\n' "$toolchain_config_hash"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore ccache
+        id: restore-ccache
+        if: ${{ inputs.cold_build != true }}
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: source/.ccache
+          key: ${{ steps.cache-keys.outputs.ccache_key }}
+          restore-keys: |
+            ${{ steps.cache-keys.outputs.ccache_restore_family }}
+
+      - name: Restore staging_dir/host cache
+        id: restore-host
+        if: ${{ inputs.cold_build != true }}
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: source/staging_dir/host
+          key: ${{ steps.cache-keys.outputs.host_key }}
+
+      - name: Restore staging_dir/hostpkg cache
+        id: restore-hostpkg
+        if: ${{ inputs.cold_build != true }}
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: source/staging_dir/hostpkg
+          key: ${{ steps.cache-keys.outputs.hostpkg_key }}
+
+      - name: Report cache restore state
+        id: cache-state
+        if: ${{ always() }}
+        working-directory: ${{ github.workspace }}/source
+        env:
+          RESTORE_CACHES: ${{ inputs.cold_build != true && steps.cache-keys.outcome == 'success' }}
+          DL_CACHE_HIT: ${{ steps.restore-dl.outputs.cache-hit }}
+          CCACHE_CACHE_HIT: ${{ steps.restore-ccache.outputs.cache-hit }}
+          HOST_CACHE_HIT: ${{ steps.restore-host.outputs.cache-hit }}
+          HOSTPKG_CACHE_HIT: ${{ steps.restore-hostpkg.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+
+          cache_state() {
+            if [ "$RESTORE_CACHES" != "true" ]; then
+              printf 'skipped'
+              return
+            fi
+
+            case "$1" in
+              true) printf 'hit' ;;
+              false) printf 'partial' ;;
+              skipped) printf 'skipped' ;;
+              "") printf 'miss' ;;
+              *) printf '%s' "$1" ;;
+            esac
+          }
+
+          dl_state="$(cache_state "$DL_CACHE_HIT")"
+          ccache_state="$(cache_state "$CCACHE_CACHE_HIT")"
+          host_state="$(cache_state "$HOST_CACHE_HIT")"
+          hostpkg_state="$(cache_state "$HOSTPKG_CACHE_HIT")"
+          toolchain_state="disabled"
+
+          {
+            printf 'dl_state=%s\n' "$dl_state"
+            printf 'ccache_state=%s\n' "$ccache_state"
+            printf 'host_state=%s\n' "$host_state"
+            printf 'hostpkg_state=%s\n' "$hostpkg_state"
+            printf 'toolchain_state=%s\n' "$toolchain_state"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Cache restore state"
+            echo
+            echo "| Cache | State |"
+            echo "| --- | --- |"
+            echo "| dl | \`${dl_state}\` |"
+            echo "| ccache | \`${ccache_state}\` |"
+            echo "| staging_dir/host | \`${host_state}\` |"
+            echo "| staging_dir/hostpkg | \`${hostpkg_state}\` |"
+            echo "| staging_dir/toolchain-* | \`${toolchain_state}\` |"
+            echo
+            echo "Toolchain tree hash: \`${{ steps.cache-keys.outputs.toolchain_tree_hash }}\`"
+            echo
+            echo "Toolchain config hash: \`${{ steps.cache-keys.outputs.toolchain_config_hash }}\`"
+            echo
+            echo "Restored directory sizes:"
+            echo
+            echo '```text'
+            du -sh dl .ccache staging_dir/host staging_dir/hostpkg 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Configure ccache limit
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          ccache --set-config=max_size=5G
+          ccache --zero-stats || true
+          ccache --show-stats || true
+
+      - name: Download sources
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          set -o pipefail
+          make download -j"$(nproc)" 2>&1 | tee make-download.log
+
+      - name: Save dl cache
+        if: ${{ inputs.cold_build != true && steps.restore-dl.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: source/dl
+          key: ${{ steps.restore-dl.outputs.cache-primary-key }}
+
+      - name: Build/install toolchain
+        id: validate-toolchain
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          set -euo pipefail
+
+          start="$(date +%s)"
+          set -o pipefail
+          make -j"$(nproc)" toolchain/install V=s 2>&1 | tee make-toolchain-install.log
+          end="$(date +%s)"
+          elapsed="$((end - start))"
+          rebuild_count="$(grep -c '^time: toolchain/' make-toolchain-install.log || true)"
+
+          {
+            printf 'elapsed_seconds=%s\n' "$elapsed"
+            printf 'rebuild_count=%s\n' "$rebuild_count"
+          } >> "$GITHUB_OUTPUT"
+
+          printf 'Toolchain install took %ss and reported %s toolchain subdir rebuild(s).\n' "$elapsed" "$rebuild_count"
+
+      - name: Build firmware
+        id: build
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" 2>&1 | tee make.log
+
+      - name: Write ccache stats
+        if: ${{ always() && steps.install-deps.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}/source
+        run: ccache --show-stats --verbose | tee ccache-stats.txt || true
+
+      - name: Save ccache
+        if: ${{ success() && inputs.cold_build != true && steps.restore-ccache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: source/.ccache
+          key: ${{ steps.cache-keys.outputs.ccache_save_key }}
+
+      - name: Save staging_dir/host cache
+        if: ${{ success() && inputs.cold_build != true && steps.restore-host.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: source/staging_dir/host
+          key: ${{ steps.cache-keys.outputs.host_key }}
+
+      - name: Save staging_dir/hostpkg cache
+        if: ${{ success() && inputs.cold_build != true && steps.restore-hostpkg.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: source/staging_dir/hostpkg
+          key: ${{ steps.cache-keys.outputs.hostpkg_key }}
+
+      - name: Verify release artifacts
+        id: verify-artifacts
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          set -euo pipefail
+
+          target_dir="bin/targets/layerscape/armv8_64b"
+          upstream_version="${RELEASE_TAG#mono-ask-v}"
+          upstream_version="${upstream_version%-r*}"
+          image_prefix="mono-openwrt-${VERSION_NUMBER}-layerscape-armv8_64b-mono_gateway-dk"
+          sysupgrade="${target_dir}/${image_prefix}-ext4-sysupgrade.bin.gz"
+          rootfs="${target_dir}/${image_prefix}-ext4-rootfs.ext4.gz"
+          manifest="${target_dir}/${image_prefix}.manifest"
+
+          test -f "$sysupgrade"
+          test -f "$rootfs"
+          test -f "$manifest"
+          test -f "${target_dir}/sha256sums"
+          test -f "${target_dir}/config.buildinfo"
+          test -f "${target_dir}/feeds.buildinfo"
+          test -f "${target_dir}/profiles.json"
+          test -f "${target_dir}/version.buildinfo"
+
+          grep -F "CONFIG_VERSION_DIST=\"Mono OpenWrt\"" "${target_dir}/config.buildinfo"
+          grep -F "CONFIG_VERSION_NUMBER=\"${VERSION_NUMBER}\"" "${target_dir}/config.buildinfo"
+          grep -F "CONFIG_VERSION_CODE=\"${VERSION_CODE}\"" "${target_dir}/config.buildinfo"
+          grep -F "\"image_prefix\":\"${image_prefix}\"" "${target_dir}/profiles.json"
+
+          tmp_rootfs="$(mktemp)"
+          gzip -dc "$rootfs" > "$tmp_rootfs"
+          /usr/sbin/debugfs -R 'cat /etc/openwrt_release' "$tmp_rootfs" > /tmp/openwrt_release 2>/tmp/debugfs-openwrt-release.log
+          /usr/sbin/debugfs -R 'cat /usr/lib/os-release' "$tmp_rootfs" > /tmp/os_release 2>/tmp/debugfs-os-release.log
+          /usr/sbin/debugfs -R 'cat /etc/openwrt_version' "$tmp_rootfs" > /tmp/openwrt_version 2>/tmp/debugfs-openwrt-version.log
+          rm -f "$tmp_rootfs"
+
+          grep -F "DISTRIB_ID='Mono OpenWrt'" /tmp/openwrt_release
+          grep -F "DISTRIB_RELEASE='${VERSION_NUMBER}'" /tmp/openwrt_release
+          grep -F "DISTRIB_DESCRIPTION='Mono OpenWrt ${VERSION_NUMBER} ${VERSION_CODE}'" /tmp/openwrt_release
+          grep -F "OPENWRT_RELEASE=\"Mono OpenWrt ${VERSION_NUMBER} ${VERSION_CODE}\"" /tmp/os_release
+          grep -Fx "$VERSION_CODE" /tmp/openwrt_version
+
+          mkdir -p /tmp/release-payload
+          cp \
+            "$sysupgrade" \
+            "$rootfs" \
+            "$manifest" \
+            "${target_dir}/sha256sums" \
+            "${target_dir}/config.buildinfo" \
+            "${target_dir}/feeds.buildinfo" \
+            "${target_dir}/profiles.json" \
+            "${target_dir}/version.buildinfo" \
+            /tmp/release-payload/
+
+          bash .github/workflows/scripts/generate-mono-ask-release-notes.sh /tmp/release-payload/RELEASE_NOTES.md
+
+          {
+            printf 'image_prefix=%s\n' "$image_prefix"
+            printf 'sysupgrade=%s\n' "$(basename "$sysupgrade")"
+            printf 'rootfs=%s\n' "$(basename "$rootfs")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload build logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mono-ask-advance-release-line-build-logs
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            source/.config
+            source/ccache-stats.txt
+            source/make-download.log
+            source/make-toolchain-install.log
+            source/make.log
+            source/logs/**
+
+      - name: Upload release payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.RELEASE_ARTIFACT }}
+          if-no-files-found: error
+          retention-days: 14
+          path: /tmp/release-payload/**
+
+      - name: Write build summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "### Mono ASK release line advance build"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| upstream tag | \`${UPSTREAM_TAG}\` |"
+            echo "| upstream commit | \`${UPSTREAM_SHA}\` |"
+            echo "| release tag | \`${RELEASE_TAG}\` |"
+            echo "| candidate SHA | \`${{ steps.verify-candidate.outputs.candidate_sha }}\` |"
+            echo "| image version | \`${VERSION_NUMBER}\` |"
+            echo "| image code | \`${VERSION_CODE}\` |"
+            echo "| build result | \`${{ steps.build.outcome }}\` |"
+            echo "| image prefix | \`${{ steps.verify-artifacts.outputs.image_prefix }}\` |"
+            echo "| cache epoch | \`${CACHE_EPOCH}\` |"
+            echo "| cold build | \`${{ inputs.cold_build == true }}\` |"
+            echo "| dl cache | \`${{ steps.cache-state.outputs.dl_state }}\` |"
+            echo "| ccache | \`${{ steps.cache-state.outputs.ccache_state }}\` |"
+            echo "| staging_dir/host | \`${{ steps.cache-state.outputs.host_state }}\` |"
+            echo "| staging_dir/hostpkg | \`${{ steps.cache-state.outputs.hostpkg_state }}\` |"
+            echo "| staging_dir/toolchain-* | \`${{ steps.cache-state.outputs.toolchain_state }}\` |"
+            echo "| toolchain install | \`${{ steps.validate-toolchain.outputs.elapsed_seconds }}s, ${{ steps.validate-toolchain.outputs.rebuild_count }} rebuilds\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-prerelease:
+    name: Publish branches, tag, and pre-release
+    needs:
+      - prepare-candidate
+      - build-candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    env:
+      RELEASE_TAG: ${{ needs.prepare-candidate.outputs.release_tag }}
+      VERSION_NUMBER: ${{ needs.prepare-candidate.outputs.version_number }}
+      VERSION_CODE: ${{ needs.prepare-candidate.outputs.version_code }}
+      RELEASE_VERSION: ${{ needs.prepare-candidate.outputs.release_version }}
+      UPSTREAM_TAG: ${{ needs.prepare-candidate.outputs.upstream_tag }}
+      UPSTREAM_SHA: ${{ needs.prepare-candidate.outputs.upstream_sha }}
+      BASE_BRANCH: ${{ needs.prepare-candidate.outputs.base_branch }}
+      OSS_BRANCH: ${{ needs.prepare-candidate.outputs.oss_branch }}
+      ASK_BRANCH: ${{ needs.prepare-candidate.outputs.ask_branch }}
+      BASE_SHA: ${{ needs.prepare-candidate.outputs.base_sha }}
+      OSS_SHA: ${{ needs.prepare-candidate.outputs.oss_sha }}
+      ASK_SHA: ${{ needs.prepare-candidate.outputs.ask_sha }}
+      STABLE_BASE_BRANCH: ${{ needs.prepare-candidate.outputs.stable_base_branch }}
+      STABLE_OSS_BRANCH: ${{ needs.prepare-candidate.outputs.stable_oss_branch }}
+      STABLE_ASK_BRANCH: ${{ needs.prepare-candidate.outputs.stable_ask_branch }}
+      MONO_REVISION: ${{ inputs.mono_revision }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download candidate bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.CANDIDATE_ARTIFACT }}
+          path: /tmp/mono-ask-release-candidate
+
+      - name: Check out candidate refs from bundle
+        run: |
+          set -euo pipefail
+          cd /tmp/mono-ask-release-candidate
+          sha256sum -c "${CANDIDATE_BUNDLE}.sha256"
+          git clone "${CANDIDATE_BUNDLE}" "${GITHUB_WORKSPACE}/source"
+          cd "${GITHUB_WORKSPACE}/source"
+          git switch --force-create "$BASE_BRANCH" "origin/$BASE_BRANCH"
+          git switch --force-create "$OSS_BRANCH" "origin/$OSS_BRANCH"
+          git switch --force-create "$ASK_BRANCH" "origin/$ASK_BRANCH"
+          test "$(git rev-parse "$BASE_BRANCH")" = "$BASE_SHA"
+          test "$(git rev-parse "$OSS_BRANCH")" = "$OSS_SHA"
+          test "$(git rev-parse "$ASK_BRANCH")" = "$ASK_SHA"
+
+      - name: Download release payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.RELEASE_ARTIFACT }}
+          path: release-payload
+
+      - name: Configure authenticated origin
+        working-directory: ${{ github.workspace }}/source
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Publish candidate refs
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          set -euo pipefail
+
+          for branch in "$BASE_BRANCH" "$OSS_BRANCH" "$ASK_BRANCH"; do
+            if git show-ref --verify --quiet "refs/remotes/origin/${branch}"; then
+              printf '::error::Release branch already exists: %s\n' "$branch" >&2
+              exit 1
+            fi
+          done
+
+          if git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
+            printf '::error::Release tag already exists: %s\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            printf '::error::GitHub release already exists for tag %s; refusing to overwrite it\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          git tag -a "$RELEASE_TAG" "$ASK_SHA" \
+            -m "Mono ASK v${RELEASE_VERSION}-${MONO_REVISION:-r1}" \
+            -m "Advanced ${STABLE_ASK_BRANCH} to upstream OpenWrt ${UPSTREAM_TAG}." \
+            -m "Software build passed; hardware smoke validation required before publishing as stable."
+
+          git push --atomic origin \
+            "${BASE_SHA}:refs/heads/${BASE_BRANCH}" \
+            "${OSS_SHA}:refs/heads/${OSS_BRANCH}" \
+            "${ASK_SHA}:refs/heads/${ASK_BRANCH}" \
+            "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+
+      - name: Fast-forward stable line tracking branches
+        working-directory: ${{ github.workspace }}/source
+        run: |
+          set -euo pipefail
+
+          for pair in "${STABLE_BASE_BRANCH}:${BASE_SHA}" "${STABLE_OSS_BRANCH}:${OSS_SHA}" "${STABLE_ASK_BRANCH}:${ASK_SHA}"; do
+            branch="${pair%%:*}"
+            sha="${pair##*:}"
+            git push origin "${sha}:refs/heads/${branch}"
+          done
+
+      - name: Publish pre-release
+        env:
+          CANDIDATE_SHA: ${{ needs.build-candidate.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t assets < <(find release-payload -maxdepth 1 -type f ! -name RELEASE_NOTES.md -print | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            printf '::error::No release assets found\n' >&2
+            exit 1
+          fi
+
+          gh release create "$RELEASE_TAG" "${assets[@]}" \
+            --verify-tag \
+            --prerelease \
+            --latest=false \
+            --title "Mono OpenWrt ${VERSION_NUMBER} ${RELEASE_TAG}" \
+            --notes-file release-payload/RELEASE_NOTES.md
+
+          {
+            echo "### Mono ASK pre-release"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| upstream tag | \`${UPSTREAM_TAG}\` |"
+            echo "| release tag | \`${RELEASE_TAG}\` |"
+            echo "| candidate SHA | \`${CANDIDATE_SHA}\` |"
+            echo "| base branch | \`${BASE_BRANCH}\` |"
+            echo "| mono-oss branch | \`${OSS_BRANCH}\` |"
+            echo "| mono-ask branch | \`${ASK_BRANCH}\` |"
+            echo "| stable line tracking branches | \`${STABLE_BASE_BRANCH}\`, \`${STABLE_OSS_BRANCH}\`, \`${STABLE_ASK_BRANCH}\` (fast-forwarded) |"
+            echo "| image version | \`${VERSION_NUMBER}\` |"
+            echo "| image code | \`${VERSION_CODE}\` |"
+            echo "| release state | \`pre-release\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
