@@ -1486,8 +1486,8 @@ diff --git a/net/xfrm/xfrm_state.c b/net/xfrm/xfrm_state.c
  	}
 @@ -766,6 +834,12 @@
  
- 		if (x->id.spi)
- 			hlist_del_rcu(&x->byspi);
+ 		if (!hlist_unhashed(&x->byspi))
+ 			hlist_del_init_rcu(&x->byspi);
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
 +		if (x->handle && x->in_byh_hash) {
 +			hlist_del_rcu(&x->byh);
