@@ -226,6 +226,14 @@ prepare() {
 }
 
 publish() {
+	if [ "$MAIN_BRANCH" != main ] ||
+		[ "$MONO_OSS_BRANCH" != mono-oss ] ||
+		[ "$MONO_ASK_BRANCH" != mono-ask ]; then
+		printf '::error::Refusing to publish unexpected branch set: MAIN_BRANCH=%s MONO_OSS_BRANCH=%s MONO_ASK_BRANCH=%s\n' \
+			"$MAIN_BRANCH" "$MONO_OSS_BRANCH" "$MONO_ASK_BRANCH" >&2
+		exit 1
+	fi
+
 	if ! git show-ref --verify --quiet "refs/heads/${MAIN_BRANCH}" ||
 		! git show-ref --verify --quiet "refs/heads/${MONO_OSS_BRANCH}" ||
 		! git show-ref --verify --quiet "refs/heads/${MONO_ASK_BRANCH}"; then
