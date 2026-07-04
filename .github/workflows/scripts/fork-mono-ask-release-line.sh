@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# Forks a brand new Mono stable release line off the current rolling dev
+# trunk (main/mono-oss/mono-ask). Only correct when UPSTREAM_TAG is close to
+# main's current history — i.e. right around when upstream itself branches a
+# new openwrt-YY.MM release off main. Once main has moved on (e.g. a kernel
+# version bump), replaying main/mono-oss/mono-ask's own commits onto an older
+# release tag will fail, because their content is continuously rebased to
+# match whatever main currently looks like, not the tag's tree.
+#
+# To advance an *existing* stable line to a new point release within the same
+# release branch (e.g. v25.12.5 -> v25.12.6), use
+# advance-mono-ask-release-line.sh instead, which replays a persistent
+# stable-line branch's own commits, not main/mono-oss/mono-ask's.
 set -euo pipefail
 
 ORIGIN_REMOTE="${ORIGIN_REMOTE:-origin}"
