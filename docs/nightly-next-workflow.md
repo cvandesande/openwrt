@@ -121,8 +121,10 @@ prove hardware behavior and must not be treated as validation by itself.
 Hardware validation happens only through the release pipeline, not against nightly
 `mono-ask` directly:
 
-- To validate an official upstream release cut, use `Cut Mono ASK Release Candidate`
-  followed by `Mono ASK Release Build`.
+- To fork a brand new stable release line, use `Fork Mono ASK Release Line`. To
+  advance an existing stable line to its next upstream point release, use
+  `Advance Mono ASK Release Line` instead — see `docs/mono-release-workflow.md`
+  for when each applies.
 - To smoke test current in-progress work without waiting for an official upstream
   release, use `Cut Mono ASK Snapshot Release` to tag current `mono-ask` and publish it
   as a pre-release.

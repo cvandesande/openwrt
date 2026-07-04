@@ -1,32 +1,58 @@
 # Mono Release Workflow
 
-There are two ways to produce a hardware-validatable Mono OpenWrt pre-release:
-an official release cut tied to an upstream OpenWrt tag (`Cut Mono ASK Release
-Candidate`), and an ad-hoc snapshot cut from the current `mono-ask` tip
-(`Cut Mono ASK Snapshot Release`), for smoke testing in-progress work without
-waiting for the next official upstream release. Both produce a GitHub
-pre-release built by the same underlying `Mono ASK Build and Publish` reusable
-workflow, and both are gated on manual hardware smoke testing before
-promotion; see `docs/nightly-next-workflow.md`'s "Hardware Validation" section
-for the smoke-test procedure that applies to either path.
+Mono OpenWrt maintains two, deliberately separate branch tiers:
+
+- **Rolling** (`main` → `mono-oss` → `mono-ask`): a dev trunk that tracks
+  upstream OpenWrt `main` and is rebuilt every night (see
+  `docs/nightly-next-workflow.md`). It never ships directly. Upstream `main`
+  moves ahead of any release branch over time — including structural changes
+  like the 6.12 → 6.18 kernel bump in mid-2026 — so rolling `mono-oss`/
+  `mono-ask` commits are continuously re-expressed in terms of whatever `main`
+  currently looks like. That makes them unsuitable for replaying directly onto
+  an older, frozen release tag once the two have structurally diverged.
+- **Stable, per release line** (`mono-base-<line>` → `mono-oss-<line>` →
+  `mono-ask-<line>`, e.g. `mono-oss-25.12`/`mono-ask-25.12`): a persistent
+  tracking branch pair per upstream `openwrt-YY.MM` release branch (upstream
+  cuts one of these roughly yearly: `openwrt-21.02`, `22.03`, `23.05`, `24.10`,
+  `25.12`, ...). This is the only tier that ever actually ships a numbered
+  Mono release, and it is advanced independently of whatever the rolling tier
+  is doing.
+
+There are three ways to produce a hardware-validatable Mono OpenWrt
+pre-release: forking a brand new stable line (`Fork Mono ASK Release Line`),
+advancing an existing stable line to the next upstream point release
+(`Advance Mono ASK Release Line`), and an ad-hoc snapshot cut from the current
+`mono-ask` tip (`Cut Mono ASK Snapshot Release`) for smoke testing
+in-progress dev-trunk work without waiting for any official release. All
+three produce a GitHub pre-release, and all are gated on manual hardware
+smoke testing before promotion; see `docs/nightly-next-workflow.md`'s
+"Hardware Validation" section for the smoke-test procedure that applies to
+any of them.
 
 Nightly CI (`Nightly Build`) only proves that `main`, `mono-oss`, and
 `mono-ask` build; it does not gate on hardware validation and does not itself
-produce a release. Cut a release or snapshot from the branch you want to
-validate.
+produce a release.
 
-## Official Release Cut
+## Forking a New Stable Line
 
-The preferred official release path is `Cut Mono ASK Release Candidate`. It
-takes an official upstream OpenWrt release tag, prepares the three Mono
-release refs, builds the candidate firmware, and publishes the successful CI
-output as a GitHub pre-release.
+Use `Fork Mono ASK Release Line` only once per upstream release branch: the
+first time you ship against a new `openwrt-YY.MM` line, ideally soon after
+upstream forks it off `main` (before the rolling trunk drifts structurally
+ahead of it). It takes an official upstream OpenWrt release tag, replays the
+rolling trunk's own patches onto it via
+`fork-mono-ask-release-line.sh`, builds the candidate firmware, and publishes
+the successful CI output as a GitHub pre-release.
 
-The candidate prep step uses the normal branch hierarchy but narrows the replay
-ranges for a stable release cut: `main..mono-oss` is replayed onto the official
-OpenWrt tag, then `mono-oss..mono-ask` is replayed onto that Mono OSS release
-branch. That avoids accidentally carrying unrelated upstream snapshot commits
-from `main` into a stable release candidate.
+The prep step narrows the replay ranges for a stable release cut: `main..
+mono-oss` is replayed onto the official OpenWrt tag, then `mono-oss..
+mono-ask` is replayed onto that Mono OSS release branch. That avoids
+accidentally carrying unrelated upstream snapshot commits from `main` into a
+stable release candidate. Because this replays the *rolling* trunk's
+commits, it only works while `main` and the target release tag are still
+close enough in tree structure that the replay applies cleanly — if `main`
+has since moved (e.g. past a kernel version bump the release line never
+takes), use "Advancing an Existing Stable Line" below instead, or the fork
+will fail with rebase conflicts in the prep job.
 
 Example inputs:
 
@@ -46,6 +72,45 @@ release_tag:    mono-ask-v25.12.4-r1
 version_number: 25.12.4-mono1
 version_code:   mono-ask-v25.12.4-r1
 ```
+
+After a successful fork, create the persistent stable-line tracking branches
+(`mono-base-<line>`, `mono-oss-<line>`, `mono-ask-<line>`) pointing at the
+`_candidate`/base/oss branches this run produced — future point releases on
+that line advance from there.
+
+## Advancing an Existing Stable Line
+
+Use `Advance Mono ASK Release Line` for every point release after the initial
+fork (e.g. `v25.12.4` → `v25.12.5` → `v25.12.6`, ...). It takes the persistent
+`mono-base-<line>`/`mono-oss-<line>`/`mono-ask-<line>` tracking branches for
+the line you name, replays only *that line's own* commits
+(`advance-mono-ask-release-line.sh`) onto the new upstream point-release tag,
+builds, and — on success — fast-forwards those tracking branches to the newly
+cut release branches, then publishes the pre-release. This never touches or
+depends on the rolling `main`/`mono-oss`/`mono-ask` trunk, so it stays correct
+no matter how far the rolling trunk has drifted (different kernel version,
+renamed directories, etc.) — point releases within one upstream release
+branch don't carry that kind of structural change.
+
+Example inputs:
+
+```text
+release_line: 25.12
+upstream_tag: v25.12.6
+mono_revision: r1
+mono_number:  mono1
+```
+
+These derive the same style of output refs as a fork (`mono-base-v25.12.6-r1`,
+`mono-oss-v25.12.6-r1`, `mono-ask-v25.12.6-r1-candidate`,
+`mono-ask-v25.12.6-r1`), while reading from and then updating
+`mono-base-25.12`/`mono-oss-25.12`/`mono-ask-25.12`.
+
+If a Mono-specific fix needs to reach the stable line and was only ever
+developed on rolling `mono-ask`, cherry-pick that commit onto
+`mono-ask-<line>` by hand before running this workflow — there is no
+automatic porting between the rolling trunk and any stable line once they've
+diverged.
 
 The older `Mono ASK Release Build` workflow remains available for rebuilding
 and publishing an already cut, annotated Mono ASK release tag (official format
@@ -96,7 +161,8 @@ GitHub release manually in the GitHub Web UI.
 
 ## Security Model
 
-The workflow keeps the same CI/CD safety posture as the nightly workflow:
+Both the fork and advance workflows keep the same CI/CD safety posture as the
+nightly workflow:
 
 - External GitHub Actions are pinned to full commit SHAs.
 - A guard step fails the run if any external action in `.github/workflows` is
@@ -108,10 +174,15 @@ The workflow keeps the same CI/CD safety posture as the nightly workflow:
   code from the candidate tag.
 - Release publication refuses to overwrite an existing GitHub release for the
   same tag.
-- Release cutting refuses to overwrite an existing release branch or tag; use
-  a new Mono revision such as `r2` instead.
+- Both workflows refuse to overwrite an existing release branch or tag; use a
+  new Mono revision such as `r2` instead.
 - The release workflow requires `version_code` to match `release_tag`, and the
   image version must match the version embedded in the tag.
+- Advancing a stable line only fast-forwards its tracking branches
+  (`mono-base-<line>`/`mono-oss-<line>`/`mono-ask-<line>`) after the new
+  versioned release branches and tag have already been pushed successfully, so
+  a failed or interrupted run never leaves the tracking branches ahead of a
+  published release.
 
 ## Validation
 
@@ -131,17 +202,28 @@ The candidate preparation and build jobs verify:
   `/usr/lib/os-release`, and `/etc/openwrt_version` report the expected Mono
   release identity.
 
-If the stable release replay conflicts, the workflow stops in the preparation
-job before pushing any release branches, tags, or GitHub releases. The failed
-job summary lists the conflicted files. Land the minimal compatibility fix on
-the appropriate integration branch, usually `mono-oss` or `mono-ask`, then
-rerun the release cut with the same upstream tag and the intended Mono revision
-if it is still unused.
+If the replay conflicts, the workflow stops in the preparation job before
+pushing any release branches, tags, or GitHub releases. The failed job summary
+lists the conflicted files.
 
-The preparation script has one narrow built-in resolver for the known
-`v25.12.4` image makefile conflict: it preserves upstream's
-`traverse_ten64_mtd` device block and inserts the Mono Gateway DK device block
-before it. Any other conflict still fails closed.
+- For a **fork** conflict: this usually means `main` has moved too far past
+  the target release tag for the rolling trunk's patches to replay cleanly
+  (see "Forking a New Stable Line" above) — use "Advance Mono ASK Release
+  Line" against an already-forked line instead, or land the minimal
+  compatibility fix on `mono-oss`/`mono-ask` and rerun.
+- For an **advance** conflict: this means a real content conflict between a
+  Mono patch and an upstream point-release backport touching the same lines
+  — land the minimal compatibility fix directly on `mono-oss-<line>` or
+  `mono-ask-<line>`, then rerun with the same upstream tag and Mono revision
+  if still unused.
+
+The fork script (`fork-mono-ask-release-line.sh`) has one narrow built-in
+resolver for the known `v25.12.4` image makefile conflict: it preserves
+upstream's `traverse_ten64_mtd` device block and inserts the Mono Gateway DK
+device block before it. Any other conflict still fails closed. The advance
+script (`advance-mono-ask-release-line.sh`) has no such resolver — point
+releases within one upstream line aren't expected to reproduce that class of
+conflict.
 
 Build-log artifacts include `make-toolchain-install.log` and
 `ccache-stats.txt` so cache effectiveness can be checked separately from total

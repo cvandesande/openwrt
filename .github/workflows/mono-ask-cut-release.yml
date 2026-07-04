@@ -1,10 +1,10 @@
-name: Cut Mono ASK Release Candidate
+name: Fork Mono ASK Release Line
 
 on:
   workflow_dispatch:
     inputs:
       upstream_tag:
-        description: "Official upstream OpenWrt release tag to base this Mono release on."
+        description: "Official upstream OpenWrt release tag to fork a new Mono stable line from. Only use this close to when upstream itself branches a new openwrt-YY.MM off main; for a later point release on an already-forked line, use 'Advance Mono ASK Release Line' instead."
         required: true
         default: "v25.12.4"
         type: string
@@ -100,7 +100,7 @@ jobs:
           UPSTREAM_TAG: ${{ inputs.upstream_tag }}
           MONO_REVISION: ${{ inputs.mono_revision }}
           MONO_NUMBER: ${{ inputs.mono_number }}
-        run: bash .github/workflows/scripts/prepare-mono-ask-release-candidate.sh
+        run: bash .github/workflows/scripts/fork-mono-ask-release-line.sh
 
       - name: Bundle candidate refs
         working-directory: ${{ github.workspace }}/source
