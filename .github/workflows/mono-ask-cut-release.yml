@@ -163,6 +163,13 @@ jobs:
           git switch --force-create "$ASK_BRANCH" "origin/$ASK_BRANCH"
           test "$(git rev-parse HEAD)" = "$ASK_SHA"
 
+      - name: Check out workflow scripts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: mono-ask
+          persist-credentials: false
+          path: workflow-scripts
+
       - name: Verify candidate metadata
         id: verify-candidate
         working-directory: ${{ github.workspace }}/source
@@ -550,7 +557,7 @@ jobs:
             "${target_dir}/version.buildinfo" \
             /tmp/release-payload/
 
-          bash .github/workflows/scripts/generate-mono-ask-release-notes.sh /tmp/release-payload/RELEASE_NOTES.md
+          bash "${GITHUB_WORKSPACE}/workflow-scripts/.github/workflows/scripts/generate-mono-ask-release-notes.sh" /tmp/release-payload/RELEASE_NOTES.md
 
           {
             printf 'image_prefix=%s\n' "$image_prefix"
