@@ -724,15 +724,23 @@ jobs:
             "${ASK_SHA}:refs/heads/${ASK_BRANCH}" \
             "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
 
-      - name: Fast-forward stable line tracking branches
+      - name: Advance stable line tracking branches
         working-directory: ${{ github.workspace }}/source
         run: |
           set -euo pipefail
 
+          # Each advance fully regenerates base_branch from the upstream tag and
+          # rebases oss/ask onto it, so the resulting commits are never literal
+          # descendants of the previous tracking-branch tip even when content is
+          # identical. A plain fast-forward push can never succeed here; use
+          # force-with-lease against the tip these branches were read from in
+          # the prepare step, the same safety pattern nightly's tracking-branch
+          # publish uses for the same reason.
           for pair in "${STABLE_BASE_BRANCH}:${BASE_SHA}" "${STABLE_OSS_BRANCH}:${OSS_SHA}" "${STABLE_ASK_BRANCH}:${ASK_SHA}"; do
             branch="${pair%%:*}"
             sha="${pair##*:}"
-            git push origin "${sha}:refs/heads/${branch}"
+            lease_sha="$(git rev-parse "refs/remotes/origin/${branch}")"
+            git push "--force-with-lease=refs/heads/${branch}:${lease_sha}" origin "${sha}:refs/heads/${branch}"
           done
 
       - name: Publish pre-release
