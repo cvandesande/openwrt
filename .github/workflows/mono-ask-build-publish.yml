@@ -218,6 +218,7 @@ jobs:
             printf 'CONFIG_VERSION_DIST="Mono OpenWrt"\n'
             printf 'CONFIG_VERSION_NUMBER="%s"\n' "$VERSION_NUMBER"
             printf 'CONFIG_VERSION_CODE="%s"\n' "$VERSION_CODE"
+            printf 'CONFIG_VERSION_CODE_FILENAMES=n\n'
             printf 'CONFIG_DEVEL=y\n'
             printf 'CONFIG_CCACHE=y\n'
             printf 'CONFIG_CCACHE_DIR="%s/.ccache"\n' "$PWD"
