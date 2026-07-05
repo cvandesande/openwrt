@@ -1,0 +1,297 @@
+name: Mono OpenWrt cached build
+description: >-
+  Shared cache-key computation, ccache/host/hostpkg cache restore-and-save,
+  and toolchain/firmware build steps used by nightly and all mono-ask
+  release workflows. Callers are responsible for checking out the source
+  tree, restoring the dl cache, updating feeds, and writing .config before
+  invoking this action.
+
+inputs:
+  source-dir:
+    description: "Path (relative to github.workspace) of the checked-out OpenWrt source tree."
+    required: false
+    default: source
+  cache-prefix:
+    description: "Cache key namespace, e.g. 'openwrt' (nightly) or 'mono-release' (release lines)."
+    required: true
+  cache-epoch:
+    description: "Cache epoch, used to force a clean cache generation when bumped."
+    required: true
+  cold-build:
+    description: "'true' to skip restoring and saving the ccache/host/hostpkg caches."
+    required: true
+  dl-cache-hit:
+    description: "cache-hit output from the caller's own 'Restore dl cache' step."
+    required: true
+  dl-cache-primary-key:
+    description: "cache-primary-key output from the caller's own 'Restore dl cache' step."
+    required: true
+  install-deps-outcome:
+    description: "outcome of the caller's own 'Install OpenWrt build dependencies' step."
+    required: true
+
+outputs:
+  dl-state:
+    value: ${{ steps.cache-state.outputs.dl_state }}
+  ccache-state:
+    value: ${{ steps.cache-state.outputs.ccache_state }}
+  host-state:
+    value: ${{ steps.cache-state.outputs.host_state }}
+  hostpkg-state:
+    value: ${{ steps.cache-state.outputs.hostpkg_state }}
+  toolchain-state:
+    value: ${{ steps.cache-state.outputs.toolchain_state }}
+  toolchain-tree-hash:
+    value: ${{ steps.cache-keys.outputs.toolchain_tree_hash }}
+  toolchain-config-hash:
+    value: ${{ steps.cache-keys.outputs.toolchain_config_hash }}
+  toolchain-elapsed-seconds:
+    value: ${{ steps.validate-toolchain.outputs.elapsed_seconds }}
+  toolchain-rebuild-count:
+    value: ${{ steps.validate-toolchain.outputs.rebuild_count }}
+  build-outcome:
+    value: ${{ steps.build.outcome }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check Mono vendor source hashes
+      shell: bash
+      working-directory: ${{ inputs.source-dir }}
+      run: scripts/mono-check-vendor-hashes.sh
+
+    - name: Compute cache keys
+      id: cache-keys
+      shell: bash
+      working-directory: ${{ inputs.source-dir }}
+      env:
+        CACHE_PREFIX: ${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-prefix }}
+        CACHE_EPOCH: ${{ inputs.cache-epoch }}
+      run: |
+        set -euo pipefail
+
+        git_tree_hash() {
+          local path
+          for path in "$@"; do
+            git rev-parse "HEAD:${path}" 2>/dev/null || true
+          done | sha256sum | cut -d ' ' -f1
+        }
+
+        feed_revision_hash() {
+          if [ ! -d feeds ]; then
+            printf 'nofeeds\n'
+            return
+          fi
+
+          find feeds -mindepth 1 -maxdepth 1 -type d -print | sort | while read -r feed; do
+            if [ -d "${feed}/.git" ]; then
+              printf '%s %s\n' "${feed}" "$(git -C "${feed}" rev-parse HEAD)"
+            else
+              printf '%s nogit\n' "${feed}"
+            fi
+          done | sha256sum | cut -d ' ' -f1
+        }
+
+        toolchain_config_hash() {
+          grep -E '^(# )?CONFIG_(TARGET_layerscape|TARGET_(BOARD|SUBTARGET|ARCH_PACKAGES|OPTIMIZATION)|aarch64|CPU_TYPE|SOFT_FLOAT|GCC_|BINUTILS_|USE_MUSL|USE_GLIBC|LIBC|MUSL_|GDB|NASM|USE_MOLD|EXTERNAL_TOOLCHAIN|KERNEL_GIT_|EXTERNAL_KERNEL_TREE)' .config |
+            sort |
+            sha256sum |
+            cut -d ' ' -f1
+        }
+
+        # Exclude release-identity fields (unique per release/revision by
+        # design) so host/hostpkg cache keys don't needlessly miss on every
+        # mono_revision bump even though those tools don't depend on them.
+        config_hash="$(grep -Ev '^CONFIG_VERSION_(NUMBER|CODE|DIST)=' .config | sha256sum | cut -d ' ' -f1)"
+        feed_hash="$(feed_revision_hash)"
+        host_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include scripts tools)"
+        hostpkg_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include package)"
+        # Scoped to what actually affects the cross-compiler itself, not
+        # kernel patches/config -- ccache is content-addressed internally,
+        # so it stays correct across kernel-patch-only changes; this hash only
+        # picks the cache-warm-start boundary, and kernel patches (ASK or
+        # otherwise) changing shouldn't cold-start the ccache for the other
+        # ~330 non-kernel packages too.
+        toolchain_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include toolchain)"
+        toolchain_config_hash="$(toolchain_config_hash)"
+        ccache_family="${CACHE_PREFIX}-ccache-${CACHE_EPOCH}-absdir-v1-${toolchain_tree_hash}-${toolchain_config_hash}"
+        ccache_week="$(date -u +%G-W%V)"
+
+        {
+          printf 'ccache_key=%s-week-%s\n' "$ccache_family" "$ccache_week"
+          printf 'ccache_save_key=%s-week-%s\n' "$ccache_family" "$ccache_week"
+          printf 'ccache_restore_family=%s-week-\n' "$ccache_family"
+          printf 'host_key=%s-host-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$host_tree_hash" "$config_hash"
+          printf 'hostpkg_key=%s-hostpkg-%s-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$hostpkg_tree_hash" "$feed_hash" "$config_hash"
+          printf 'toolchain_tree_hash=%s\n' "$toolchain_tree_hash"
+          printf 'toolchain_config_hash=%s\n' "$toolchain_config_hash"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Restore ccache
+      id: restore-ccache
+      if: ${{ inputs.cold-build != 'true' }}
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.source-dir }}/.ccache
+        key: ${{ steps.cache-keys.outputs.ccache_key }}
+        restore-keys: |
+          ${{ steps.cache-keys.outputs.ccache_restore_family }}
+
+    - name: Restore staging_dir/host cache
+      id: restore-host
+      if: ${{ inputs.cold-build != 'true' }}
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.source-dir }}/staging_dir/host
+        key: ${{ steps.cache-keys.outputs.host_key }}
+
+    - name: Restore staging_dir/hostpkg cache
+      id: restore-hostpkg
+      if: ${{ inputs.cold-build != 'true' }}
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.source-dir }}/staging_dir/hostpkg
+        key: ${{ steps.cache-keys.outputs.hostpkg_key }}
+
+    - name: Report cache restore state
+      id: cache-state
+      if: ${{ always() }}
+      shell: bash
+      working-directory: ${{ inputs.source-dir }}
+      env:
+        RESTORE_CACHES: ${{ inputs.cold-build != 'true' && steps.cache-keys.outcome == 'success' }}
+        DL_CACHE_HIT: ${{ inputs.dl-cache-hit }}
+        CCACHE_CACHE_HIT: ${{ steps.restore-ccache.outputs.cache-hit }}
+        HOST_CACHE_HIT: ${{ steps.restore-host.outputs.cache-hit }}
+        HOSTPKG_CACHE_HIT: ${{ steps.restore-hostpkg.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+
+        cache_state() {
+          if [ "$RESTORE_CACHES" != "true" ]; then
+            printf 'skipped'
+            return
+          fi
+
+          case "$1" in
+            true) printf 'hit' ;;
+            false) printf 'partial' ;;
+            skipped) printf 'skipped' ;;
+            "") printf 'miss' ;;
+            *) printf '%s' "$1" ;;
+          esac
+        }
+
+        dl_state="$(cache_state "$DL_CACHE_HIT")"
+        ccache_state="$(cache_state "$CCACHE_CACHE_HIT")"
+        host_state="$(cache_state "$HOST_CACHE_HIT")"
+        hostpkg_state="$(cache_state "$HOSTPKG_CACHE_HIT")"
+        toolchain_state="disabled"
+
+        {
+          printf 'dl_state=%s\n' "$dl_state"
+          printf 'ccache_state=%s\n' "$ccache_state"
+          printf 'host_state=%s\n' "$host_state"
+          printf 'hostpkg_state=%s\n' "$hostpkg_state"
+          printf 'toolchain_state=%s\n' "$toolchain_state"
+        } >> "$GITHUB_OUTPUT"
+
+        {
+          echo "### Cache restore state"
+          echo
+          echo "| Cache | State |"
+          echo "| --- | --- |"
+          echo "| dl | \`${dl_state}\` |"
+          echo "| ccache | \`${ccache_state}\` |"
+          echo "| staging_dir/host | \`${host_state}\` |"
+          echo "| staging_dir/hostpkg | \`${hostpkg_state}\` |"
+          echo "| staging_dir/toolchain-* | \`${toolchain_state}\` |"
+          echo
+          echo "Toolchain tree hash: \`${{ steps.cache-keys.outputs.toolchain_tree_hash }}\`"
+          echo
+          echo "Toolchain config hash: \`${{ steps.cache-keys.outputs.toolchain_config_hash }}\`"
+          echo
+          echo "Restored directory sizes:"
+          echo
+          echo '```text'
+          du -sh dl .ccache staging_dir/host staging_dir/hostpkg 2>/dev/null || true
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Configure ccache limit
+      shell: bash
+      working-directory: ${{ inputs.source-dir }}
+      run: |
+        ccache --set-config=max_size=5G
+        ccache --zero-stats || true
+        ccache --show-stats || true
+
+    - name: Download sources
+      shell: bash
+      working-directory: ${{ inputs.source-dir }}
+      run: |
+        set -o pipefail
+        make download -j"$(nproc)" 2>&1 | tee make-download.log
+
+    - name: Save dl cache
+      if: ${{ inputs.cold-build != 'true' && inputs.dl-cache-hit != 'true' }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.source-dir }}/dl
+        key: ${{ inputs.dl-cache-primary-key }}
+
+    - name: Build/install toolchain
+      id: validate-toolchain
+      shell: bash
+      working-directory: ${{ inputs.source-dir }}
+      run: |
+        set -euo pipefail
+
+        start="$(date +%s)"
+        set -o pipefail
+        make -j"$(nproc)" toolchain/install V=s 2>&1 | tee make-toolchain-install.log
+        end="$(date +%s)"
+        elapsed="$((end - start))"
+        rebuild_count="$(grep -c '^time: toolchain/' make-toolchain-install.log || true)"
+
+        {
+          printf 'elapsed_seconds=%s\n' "$elapsed"
+          printf 'rebuild_count=%s\n' "$rebuild_count"
+        } >> "$GITHUB_OUTPUT"
+
+        printf 'Toolchain install took %ss and reported %s toolchain subdir rebuild(s).\n' "$elapsed" "$rebuild_count"
+
+    - name: Build firmware
+      id: build
+      shell: bash
+      working-directory: ${{ inputs.source-dir }}
+      run: |
+        set -o pipefail
+        make -j"$(nproc)" 2>&1 | tee make.log
+
+    - name: Write ccache stats
+      if: ${{ always() && inputs.install-deps-outcome == 'success' }}
+      shell: bash
+      working-directory: ${{ inputs.source-dir }}
+      run: ccache --show-stats --verbose | tee ccache-stats.txt || true
+
+    - name: Save ccache
+      if: ${{ success() && inputs.cold-build != 'true' && steps.restore-ccache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.source-dir }}/.ccache
+        key: ${{ steps.cache-keys.outputs.ccache_save_key }}
+
+    - name: Save staging_dir/host cache
+      if: ${{ success() && inputs.cold-build != 'true' && steps.restore-host.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.source-dir }}/staging_dir/host
+        key: ${{ steps.cache-keys.outputs.host_key }}
+
+    - name: Save staging_dir/hostpkg cache
+      if: ${{ success() && inputs.cold-build != 'true' && steps.restore-hostpkg.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.source-dir }}/staging_dir/hostpkg
+        key: ${{ steps.cache-keys.outputs.hostpkg_key }}
