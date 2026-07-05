@@ -125,7 +125,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$ASK_SHA"
 
       - name: Check out workflow scripts
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: mono-ask
           persist-credentials: false
@@ -210,7 +210,7 @@ jobs:
       - name: Restore dl cache
         id: restore-dl
         if: ${{ inputs.cold_build != true }}
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: source/dl
           key: ${{ runner.os }}-${{ runner.arch }}-mono-release-dl-${{ env.CACHE_EPOCH }}-${{ hashFiles('source/feeds.conf.default', 'source/feeds.conf') }}
@@ -242,237 +242,17 @@ jobs:
           } >> .config
           make defconfig
 
-      - name: Check Mono vendor source hashes
-        working-directory: ${{ github.workspace }}/source
-        run: scripts/mono-check-vendor-hashes.sh
-
-      - name: Compute cache keys
-        id: cache-keys
-        working-directory: ${{ github.workspace }}/source
-        env:
-          CACHE_PREFIX: ${{ runner.os }}-${{ runner.arch }}-mono-release
-        run: |
-          set -euo pipefail
-
-          git_tree_hash() {
-            local path
-            for path in "$@"; do
-              git rev-parse "HEAD:${path}" 2>/dev/null || true
-            done | sha256sum | cut -d ' ' -f1
-          }
-
-          feed_revision_hash() {
-            if [ ! -d feeds ]; then
-              printf 'nofeeds\n'
-              return
-            fi
-
-            find feeds -mindepth 1 -maxdepth 1 -type d -print | sort | while read -r feed; do
-              if [ -d "${feed}/.git" ]; then
-                printf '%s %s\n' "${feed}" "$(git -C "${feed}" rev-parse HEAD)"
-              else
-                printf '%s nogit\n' "${feed}"
-              fi
-            done | sha256sum | cut -d ' ' -f1
-          }
-
-          toolchain_config_hash() {
-            grep -E '^(# )?CONFIG_(TARGET_layerscape|TARGET_(BOARD|SUBTARGET|ARCH_PACKAGES|OPTIMIZATION)|aarch64|CPU_TYPE|SOFT_FLOAT|GCC_|BINUTILS_|USE_MUSL|USE_GLIBC|LIBC|MUSL_|GDB|NASM|USE_MOLD|EXTERNAL_TOOLCHAIN|KERNEL_GIT_|EXTERNAL_KERNEL_TREE)' .config |
-              sort |
-              sha256sum |
-              cut -d ' ' -f1
-          }
-
-          # Exclude release-identity fields (unique per release/revision by
-          # design) so host/hostpkg cache keys don't needlessly miss on every
-          # mono_revision bump even though those tools don't depend on them.
-          config_hash="$(grep -Ev '^CONFIG_VERSION_(NUMBER|CODE|DIST)=' .config | sha256sum | cut -d ' ' -f1)"
-          feed_hash="$(feed_revision_hash)"
-          host_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include scripts tools)"
-          hostpkg_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include package)"
-          # Scoped to what actually affects the cross-compiler itself, not
-          # kernel patches/config -- ccache is content-addressed internally,
-          # so it stays correct across kernel-patch-only changes; this hash only
-          # picks the cache-warm-start boundary, and kernel patches (ASK or
-          # otherwise) changing shouldn't cold-start the ccache for the other
-          # ~330 non-kernel packages too.
-          toolchain_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include toolchain)"
-          toolchain_config_hash="$(toolchain_config_hash)"
-          ccache_family="${CACHE_PREFIX}-ccache-${CACHE_EPOCH}-absdir-v1-${toolchain_tree_hash}-${toolchain_config_hash}"
-          ccache_week="$(date -u +%G-W%V)"
-
-          {
-            printf 'ccache_key=%s-week-%s\n' "$ccache_family" "$ccache_week"
-            printf 'ccache_save_key=%s-week-%s\n' "$ccache_family" "$ccache_week"
-            printf 'ccache_restore_family=%s-week-\n' "$ccache_family"
-            printf 'host_key=%s-host-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$host_tree_hash" "$config_hash"
-            printf 'hostpkg_key=%s-hostpkg-%s-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$hostpkg_tree_hash" "$feed_hash" "$config_hash"
-            printf 'toolchain_tree_hash=%s\n' "$toolchain_tree_hash"
-            printf 'toolchain_config_hash=%s\n' "$toolchain_config_hash"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Restore ccache
-        id: restore-ccache
-        if: ${{ inputs.cold_build != true }}
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      - name: Cached toolchain and firmware build
+        id: cached-build
+        uses: ./workflow-scripts/.github/actions/mono-openwrt-cached-build
         with:
-          path: source/.ccache
-          key: ${{ steps.cache-keys.outputs.ccache_key }}
-          restore-keys: |
-            ${{ steps.cache-keys.outputs.ccache_restore_family }}
-
-      - name: Restore staging_dir/host cache
-        id: restore-host
-        if: ${{ inputs.cold_build != true }}
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: source/staging_dir/host
-          key: ${{ steps.cache-keys.outputs.host_key }}
-
-      - name: Restore staging_dir/hostpkg cache
-        id: restore-hostpkg
-        if: ${{ inputs.cold_build != true }}
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: source/staging_dir/hostpkg
-          key: ${{ steps.cache-keys.outputs.hostpkg_key }}
-
-      - name: Report cache restore state
-        id: cache-state
-        if: ${{ always() }}
-        working-directory: ${{ github.workspace }}/source
-        env:
-          RESTORE_CACHES: ${{ inputs.cold_build != true && steps.cache-keys.outcome == 'success' }}
-          DL_CACHE_HIT: ${{ steps.restore-dl.outputs.cache-hit }}
-          CCACHE_CACHE_HIT: ${{ steps.restore-ccache.outputs.cache-hit }}
-          HOST_CACHE_HIT: ${{ steps.restore-host.outputs.cache-hit }}
-          HOSTPKG_CACHE_HIT: ${{ steps.restore-hostpkg.outputs.cache-hit }}
-        run: |
-          set -euo pipefail
-
-          cache_state() {
-            if [ "$RESTORE_CACHES" != "true" ]; then
-              printf 'skipped'
-              return
-            fi
-
-            case "$1" in
-              true) printf 'hit' ;;
-              false) printf 'partial' ;;
-              skipped) printf 'skipped' ;;
-              "") printf 'miss' ;;
-              *) printf '%s' "$1" ;;
-            esac
-          }
-
-          dl_state="$(cache_state "$DL_CACHE_HIT")"
-          ccache_state="$(cache_state "$CCACHE_CACHE_HIT")"
-          host_state="$(cache_state "$HOST_CACHE_HIT")"
-          hostpkg_state="$(cache_state "$HOSTPKG_CACHE_HIT")"
-          toolchain_state="disabled"
-
-          {
-            printf 'dl_state=%s\n' "$dl_state"
-            printf 'ccache_state=%s\n' "$ccache_state"
-            printf 'host_state=%s\n' "$host_state"
-            printf 'hostpkg_state=%s\n' "$hostpkg_state"
-            printf 'toolchain_state=%s\n' "$toolchain_state"
-          } >> "$GITHUB_OUTPUT"
-
-          {
-            echo "### Cache restore state"
-            echo
-            echo "| Cache | State |"
-            echo "| --- | --- |"
-            echo "| dl | \`${dl_state}\` |"
-            echo "| ccache | \`${ccache_state}\` |"
-            echo "| staging_dir/host | \`${host_state}\` |"
-            echo "| staging_dir/hostpkg | \`${hostpkg_state}\` |"
-            echo "| staging_dir/toolchain-* | \`${toolchain_state}\` |"
-            echo
-            echo "Toolchain tree hash: \`${{ steps.cache-keys.outputs.toolchain_tree_hash }}\`"
-            echo
-            echo "Toolchain config hash: \`${{ steps.cache-keys.outputs.toolchain_config_hash }}\`"
-            echo
-            echo "Restored directory sizes:"
-            echo
-            echo '```text'
-            du -sh dl .ccache staging_dir/host staging_dir/hostpkg 2>/dev/null || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Configure ccache limit
-        working-directory: ${{ github.workspace }}/source
-        run: |
-          ccache --set-config=max_size=5G
-          ccache --zero-stats || true
-          ccache --show-stats || true
-
-      - name: Download sources
-        working-directory: ${{ github.workspace }}/source
-        run: |
-          set -o pipefail
-          make download -j"$(nproc)" 2>&1 | tee make-download.log
-
-      - name: Save dl cache
-        if: ${{ inputs.cold_build != true && steps.restore-dl.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: source/dl
-          key: ${{ steps.restore-dl.outputs.cache-primary-key }}
-
-      - name: Build/install toolchain
-        id: validate-toolchain
-        working-directory: ${{ github.workspace }}/source
-        run: |
-          set -euo pipefail
-
-          start="$(date +%s)"
-          set -o pipefail
-          make -j"$(nproc)" toolchain/install V=s 2>&1 | tee make-toolchain-install.log
-          end="$(date +%s)"
-          elapsed="$((end - start))"
-          rebuild_count="$(grep -c '^time: toolchain/' make-toolchain-install.log || true)"
-
-          {
-            printf 'elapsed_seconds=%s\n' "$elapsed"
-            printf 'rebuild_count=%s\n' "$rebuild_count"
-          } >> "$GITHUB_OUTPUT"
-
-          printf 'Toolchain install took %ss and reported %s toolchain subdir rebuild(s).\n' "$elapsed" "$rebuild_count"
-
-      - name: Build firmware
-        id: build
-        working-directory: ${{ github.workspace }}/source
-        run: |
-          set -o pipefail
-          make -j"$(nproc)" 2>&1 | tee make.log
-
-      - name: Write ccache stats
-        if: ${{ always() && steps.install-deps.outcome == 'success' }}
-        working-directory: ${{ github.workspace }}/source
-        run: ccache --show-stats --verbose | tee ccache-stats.txt || true
-
-      - name: Save ccache
-        if: ${{ success() && inputs.cold_build != true && steps.restore-ccache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: source/.ccache
-          key: ${{ steps.cache-keys.outputs.ccache_save_key }}
-
-      - name: Save staging_dir/host cache
-        if: ${{ success() && inputs.cold_build != true && steps.restore-host.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: source/staging_dir/host
-          key: ${{ steps.cache-keys.outputs.host_key }}
-
-      - name: Save staging_dir/hostpkg cache
-        if: ${{ success() && inputs.cold_build != true && steps.restore-hostpkg.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: source/staging_dir/hostpkg
-          key: ${{ steps.cache-keys.outputs.hostpkg_key }}
+          source-dir: ${{ github.workspace }}/source
+          cache-prefix: mono-release
+          cache-epoch: ${{ env.CACHE_EPOCH }}
+          cold-build: ${{ inputs.cold_build }}
+          dl-cache-hit: ${{ steps.restore-dl.outputs.cache-hit }}
+          dl-cache-primary-key: ${{ steps.restore-dl.outputs.cache-primary-key }}
+          install-deps-outcome: ${{ steps.install-deps.outcome }}
 
       - name: Verify release artifacts
         id: verify-artifacts
@@ -572,16 +352,16 @@ jobs:
             echo "| candidate SHA | \`${{ steps.verify-candidate.outputs.candidate_sha }}\` |"
             echo "| image version | \`${VERSION_NUMBER}\` |"
             echo "| image code | \`${VERSION_CODE}\` |"
-            echo "| build result | \`${{ steps.build.outcome }}\` |"
+            echo "| build result | \`${{ steps.cached-build.outputs.build-outcome }}\` |"
             echo "| image prefix | \`${{ steps.verify-artifacts.outputs.image_prefix }}\` |"
             echo "| cache epoch | \`${CACHE_EPOCH}\` |"
             echo "| cold build | \`${{ inputs.cold_build == true }}\` |"
-            echo "| dl cache | \`${{ steps.cache-state.outputs.dl_state }}\` |"
-            echo "| ccache | \`${{ steps.cache-state.outputs.ccache_state }}\` |"
-            echo "| staging_dir/host | \`${{ steps.cache-state.outputs.host_state }}\` |"
-            echo "| staging_dir/hostpkg | \`${{ steps.cache-state.outputs.hostpkg_state }}\` |"
-            echo "| staging_dir/toolchain-* | \`${{ steps.cache-state.outputs.toolchain_state }}\` |"
-            echo "| toolchain install | \`${{ steps.validate-toolchain.outputs.elapsed_seconds }}s, ${{ steps.validate-toolchain.outputs.rebuild_count }} rebuilds\` |"
+            echo "| dl cache | \`${{ steps.cached-build.outputs.dl-state }}\` |"
+            echo "| ccache | \`${{ steps.cached-build.outputs.ccache-state }}\` |"
+            echo "| staging_dir/host | \`${{ steps.cached-build.outputs.host-state }}\` |"
+            echo "| staging_dir/hostpkg | \`${{ steps.cached-build.outputs.hostpkg-state }}\` |"
+            echo "| staging_dir/toolchain-* | \`${{ steps.cached-build.outputs.toolchain-state }}\` |"
+            echo "| toolchain install | \`${{ steps.cached-build.outputs.toolchain-elapsed-seconds }}s, ${{ steps.cached-build.outputs.toolchain-rebuild-count }} rebuilds\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish-prerelease:
