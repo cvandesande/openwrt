@@ -157,3 +157,52 @@ clangd --check=/home/cvandesande/mono-openwrt-project/ask-cdx/cdx-5.03.1/control
 The purpose is faster navigation and better diagnostics while editing. The
 source of truth for correctness remains the normal OpenWrt build and hardware
 validation.
+
+## Building On NixOS
+
+OpenWrt's build system expects an FHS-style Linux environment (`gcc`, `bison`,
+etc. on plain `PATH`, at fixed locations). NixOS doesn't provide one by
+default, so this repo carries two ways to get one:
+
+- `shell.nix` (repo root) — upstream OpenWrt's own Nix shell. It is synced
+  from upstream on rebases; do not add local fixes to it directly, since
+  they will be lost or conflict on the next sync.
+- `flake.nix` (repo root) — a fork-local addition, not part of upstream, that
+  wraps the same `buildFHSEnv` environment with a couple of fixes and a
+  cleaner interface. This is the recommended entry point on NixOS.
+
+### Interactive Use
+
+```sh
+nix develop
+```
+
+Drops you into the FHS environment's shell, with `gcc`, `bison`, `make`, etc.
+on `PATH` as OpenWrt's build system expects.
+
+### Scripted / Non-Interactive Use
+
+Do not use `nix develop --command ...` or `nix-shell --run ...` for
+scripting. Both hang: the environment's `shellHook` does `exec
+.../bin/openwrt-env` to drop into the FHS shell, which replaces the process
+before the `--command`/`--run` payload gets a chance to execute. Use `nix
+run` instead, which invokes the FHS environment directly without going
+through a shell hook:
+
+```sh
+nix run . -- -c 'make -j"$(nproc)" target/linux/compile'
+```
+
+### Why `flake.nix` Exists Alongside `shell.nix`
+
+`shell.nix` uses `import <nixpkgs> {}`, which floats with whatever Nix
+channel is active on the machine. If host tools this repo builds for itself
+(e.g. `tools/bison`) are built against one channel generation and the
+channel later updates, those tools' `RUNPATH`s can point at Nix store paths
+that no longer exist, breaking with errors like `error while loading shared
+libraries: lib*.so.*: cannot open shared object file`. If you hit this,
+rebuild the stale host tools with `make tools/clean && make
+tools/compile`.
+
+`flake.nix` pins `nixpkgs` via `flake.lock`, so the environment it builds is
+reproducible and doesn't drift under you between sessions.
