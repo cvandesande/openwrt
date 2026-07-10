@@ -29,7 +29,7 @@ Optional developer tooling:
 
 - [04-developer-tooling.md](04-developer-tooling.md)
   Local `clangd` and `compile_commands.json` workflow for navigating the
-  kernel and ASK package C code.
+  kernel and ASK package C code, plus notes on building this fork on NixOS.
 
 - [codeql-scoped-analysis.md](codeql-scoped-analysis.md)
   Scoped CodeQL database and SARIF workflow for ASK package integrations and
