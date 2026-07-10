@@ -123,6 +123,7 @@ runs:
           printf 'ccache_restore_family=%s-week-\n' "$ccache_family"
           printf 'host_key=%s-host-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$host_tree_hash" "$config_hash"
           printf 'hostpkg_key=%s-hostpkg-%s-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$hostpkg_tree_hash" "$feed_hash" "$config_hash"
+          printf 'toolchain_key=%s-toolchain-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$toolchain_tree_hash" "$toolchain_config_hash"
           printf 'toolchain_tree_hash=%s\n' "$toolchain_tree_hash"
           printf 'toolchain_config_hash=%s\n' "$toolchain_config_hash"
         } >> "$GITHUB_OUTPUT"
@@ -153,6 +154,14 @@ runs:
         path: ${{ inputs.source-dir }}/staging_dir/hostpkg
         key: ${{ steps.cache-keys.outputs.hostpkg_key }}
 
+    - name: Restore staging_dir/toolchain-* cache
+      id: restore-toolchain
+      if: ${{ inputs.cold-build != 'true' }}
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.source-dir }}/staging_dir/toolchain-*
+        key: ${{ steps.cache-keys.outputs.toolchain_key }}
+
     - name: Report cache restore state
       id: cache-state
       if: ${{ always() }}
@@ -164,6 +173,7 @@ runs:
         CCACHE_CACHE_HIT: ${{ steps.restore-ccache.outputs.cache-hit }}
         HOST_CACHE_HIT: ${{ steps.restore-host.outputs.cache-hit }}
         HOSTPKG_CACHE_HIT: ${{ steps.restore-hostpkg.outputs.cache-hit }}
+        TOOLCHAIN_CACHE_HIT: ${{ steps.restore-toolchain.outputs.cache-hit }}
       run: |
         set -euo pipefail
 
@@ -186,7 +196,7 @@ runs:
         ccache_state="$(cache_state "$CCACHE_CACHE_HIT")"
         host_state="$(cache_state "$HOST_CACHE_HIT")"
         hostpkg_state="$(cache_state "$HOSTPKG_CACHE_HIT")"
-        toolchain_state="disabled"
+        toolchain_state="$(cache_state "$TOOLCHAIN_CACHE_HIT")"
 
         {
           printf 'dl_state=%s\n' "$dl_state"
@@ -214,7 +224,7 @@ runs:
           echo "Restored directory sizes:"
           echo
           echo '```text'
-          du -sh dl .ccache staging_dir/host staging_dir/hostpkg 2>/dev/null || true
+          du -sh dl .ccache staging_dir/host staging_dir/hostpkg staging_dir/toolchain-* 2>/dev/null || true
           echo '```'
         } >> "$GITHUB_STEP_SUMMARY"
 
@@ -295,3 +305,10 @@ runs:
       with:
         path: ${{ inputs.source-dir }}/staging_dir/hostpkg
         key: ${{ steps.cache-keys.outputs.hostpkg_key }}
+
+    - name: Save staging_dir/toolchain-* cache
+      if: ${{ success() && inputs.cold-build != 'true' && steps.restore-toolchain.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.source-dir }}/staging_dir/toolchain-*
+        key: ${{ steps.cache-keys.outputs.toolchain_key }}
