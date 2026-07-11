@@ -106,6 +106,9 @@ jobs:
       BASE_SHA: ${{ inputs.base_sha }}
       OSS_SHA: ${{ inputs.oss_sha }}
       ASK_SHA: ${{ inputs.ask_sha }}
+      OSS_SHA_MAP: /tmp/mono-ask-release-candidate/mono-ask-sha-maps/oss.tsv
+      ASK_SHA_MAP: /tmp/mono-ask-release-candidate/mono-ask-sha-maps/ask.tsv
+      GH_TOKEN: ${{ github.token }}
       CCACHE_DIR: ${{ github.workspace }}/source/.ccache
     steps:
       - name: Download candidate bundle
