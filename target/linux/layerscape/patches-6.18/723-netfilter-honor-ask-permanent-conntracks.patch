@@ -79,7 +79,7 @@ adapting to the new kernel APIs.
 +EXPORT_SYMBOL_GPL(nf_ct_is_expired);
 --- a/net/netfilter/nf_conntrack_netlink.c
 +++ b/net/netfilter/nf_conntrack_netlink.c
-@@ -2388,6 +2388,40 @@
+@@ -2388,6 +2388,59 @@
  	return ERR_PTR(err);
  }
  
@@ -87,13 +87,29 @@ adapting to the new kernel APIs.
 + * ASK only needs to pin or unpin an already-existing installed conntrack.
 + * Handle that as a dedicated status-bit update instead of a broader state
 + * change so the control plane can make the entry permanent by id.
++ *
++ * CMM's pin/unpin messages are a full clone of the last conntrack event it
++ * received (nfct_copy(..., NFCT_CP_OVERRIDE) over the whole attribute set),
++ * so they routinely carry CTA_TIMEOUT and, for TCP, CTA_PROTOINFO as
++ * unchanged echoes of current state - the kernel's own event dump always
++ * includes CTA_TIMEOUT (ctnetlink_dump_timeout(..., false)) for every
++ * NEW/UPDATE event, so presence of those attributes is not a signal that
++ * this is some other update. Only gate on whether the *status* delta is
++ * unambiguous: touching nothing but IPS_PERMANENT means this can only be
++ * the CMM pin/unpin dialect, since any real third-party update changing
++ * other status bits (or targeting a different id) fails that comparison
++ * and falls through to ctnetlink_change_conntrack() so it is never
++ * silently dropped.
 + */
 +static int ctnetlink_change_permanent(struct nf_conn *ct,
-+				      const struct nlattr * const cda[])
++				      const struct nlattr * const cda[],
++				      struct sk_buff *skb,
++				      const struct nfnl_info *info)
 +{
 +	unsigned int status;
 +	u32 id;
 +	__be32 conntrack_id = ntohl((__force __be32)nf_ct_get_id(ct));
++	bool changed;
 +
 +	if (!cda[CTA_STATUS] || !cda[CTA_ID])
 +		return -1;
@@ -104,17 +120,20 @@ adapting to the new kernel APIs.
 +	if (conntrack_id != id)
 +		return -ENOENT;
 +
-+	if (status & IPS_PERMANENT) {
-+		set_bit(IPS_PERMANENT_BIT, &ct->status);
-+		return 0;
-+	}
++	if ((status ^ READ_ONCE(ct->status)) & ~IPS_PERMANENT)
++		return -1;
 +
-+	if (nf_ct_is_permanent(ct)) {
-+		clear_bit(IPS_PERMANENT_BIT, &ct->status);
-+		return 0;
-+	}
++	if (status & IPS_PERMANENT)
++		changed = !test_and_set_bit(IPS_PERMANENT_BIT, &ct->status);
++	else
++		changed = test_and_clear_bit(IPS_PERMANENT_BIT, &ct->status);
 +
-+	return -1;
++	if (changed)
++		nf_conntrack_eventmask_report((1 << IPCT_PROTOINFO), ct,
++					      NETLINK_CB(skb).portid,
++					      nlmsg_report(info->nlh));
++
++	return 0;
 +}
 +
  static int ctnetlink_new_conntrack(struct sk_buff *skb,
@@ -124,7 +143,7 @@ adapting to the new kernel APIs.
  	err = -EEXIST;
  	ct = nf_ct_tuplehash_to_ctrack(h);
  	if (!(info->nlh->nlmsg_flags & NLM_F_EXCL)) {
-+		err = ctnetlink_change_permanent(ct, cda);
++		err = ctnetlink_change_permanent(ct, cda, skb, info);
 +		if (err == 0 || err == -ENOENT) {
 +			nf_ct_put(ct);
 +			return err;

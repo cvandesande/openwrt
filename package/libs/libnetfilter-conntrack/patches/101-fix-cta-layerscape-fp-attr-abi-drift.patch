@@ -33,3 +33,28 @@ the numeric attribute types line up again.
  	CTA_LAYERSCAPE_FP_ORIG,
  	CTA_LAYERSCAPE_FP_REPLY,
  	__CTA_MAX
+@@ -66,14 +67,24 @@
+ };
+ #define CTA_MAX (__CTA_MAX - 1)
+ 
++/*
++ * This bundled enum drifted out of sync with the kernel's real uapi
++ * header once already (see this patch's own header comment) because
++ * upstream appended an entry ahead of ours. Pin the numbering so the
++ * next drift fails the build instead of misfiling netlink attributes
++ * at runtime; keep this in lockstep with the kernel-side assert in
++ * target/linux/layerscape/patches-6.18/721-*.patch.
++ */
++_Static_assert(CTA_LAYERSCAPE_FP_ORIG == 28, "CTA_LAYERSCAPE_FP_ORIG ABI drift");
++
+ enum ctattr_comcerto_fp {
+ 	CTA_COMCERTO_FP_UNSPEC,
+ 	CTA_COMCERTO_FP_MARK,
+ 	CTA_COMCERTO_FP_IFINDEX,
+ 	CTA_COMCERTO_FP_IIF,
+ 	CTA_COMCERTO_FP_UNDERLYING_IIF,
+ 	CTA_COMCERTO_FP_XFRM_HANDLE,
+ 	CTA_COMCERTO_FP_UNDERLYING_VID,
+ 	__CTA_COMCERTO_FP_MAX
+ };
+ #define CTA_COMCERTO_FP_MAX (__CTA_COMCERTO_FP_MAX - 1)

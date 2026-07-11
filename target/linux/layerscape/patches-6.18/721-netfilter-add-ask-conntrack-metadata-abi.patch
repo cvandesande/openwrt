@@ -126,7 +126,7 @@ Port to Linux 6.18: pure context refresh, no functional change.
  
  #include "nf_internals.h"
  
-@@ -2007,6 +2011,125 @@
+@@ -2007,6 +2011,121 @@
  	return generic_packet(ct, skb, ctinfo);
  }
  
@@ -235,11 +235,7 @@ Port to Linux 6.18: pure context refresh, no functional change.
 +		skb->layerscape_underlying_iif : dev->ifindex;
 +
 +	if (is_vlan_dev(dev)) {
-+		const struct net_device *real_dev = vlan_dev_real_dev(dev);
-+
-+		fp_info->underlying_iif = underlying_iif ?
-+			underlying_iif :
-+			(real_dev ? real_dev->ifindex : dev->ifindex);
++		fp_info->underlying_iif = underlying_iif;
 +		fp_info->underlying_vlan_id = vlan_dev_vlan_id(dev);
 +		return;
 +	}
@@ -327,10 +323,21 @@ Port to Linux 6.18: pure context refresh, no functional change.
  		.pf		= NFPROTO_IPV6,
 --- a/net/netfilter/nf_conntrack_netlink.c
 +++ b/net/netfilter/nf_conntrack_netlink.c
-@@ -353,6 +353,49 @@
+@@ -353,6 +353,60 @@
  #define ctnetlink_dump_mark(a, b, c) (0)
  #endif
  
++/*
++ * CTA_LAYERSCAPE_FP_ORIG/REPLY and IPS_PERMANENT_BIT are wire integers
++ * appended to enums upstream can also append to; if upstream inserts a
++ * new entry ahead of ours on a future kernel bump these renumber
++ * silently and netlink attributes get misfiled at runtime instead of
++ * failing to build. Re-pin these together with the libnetfilter-conntrack
++ * and ask-cmm bundled header copies if this ever fires.
++ */
++static_assert(CTA_LAYERSCAPE_FP_ORIG == 28);
++static_assert(IPS_PERMANENT_BIT == 16);
++
 +static int ctnetlink_dump_layerscape_fp_dir(struct sk_buff *skb,
 +					    const struct comcerto_fp_info *fp_info,
 +					    u16 attr)
