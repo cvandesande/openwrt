@@ -1,3 +1,18 @@
+From: Mono OpenWrt Integration <integration@mono.local>
+Date: Thu, 3 Jul 2026 12:30:00 +0100
+Subject: [PATCH] net: phy: swphy: add 10G fixed-link speed mapping
+
+fixed_phy registration on the Mono Gateway DK SFP+ ports fails for a 10G
+fixed-link because swphy_decode_speed() has no case for speed 10000; it
+falls through to the "unsupported" default and fixed_phy_add() rejects
+the link. Map 10000 onto the same SWMII_SPEED_1000 regs entry used for
+1000, since swphy has no native 10G register encoding.
+
+Side effect: the emulated BMSR this produces makes ethtool report the
+link as 1000 Mb/s even though the datapath actually runs at 10G. This is
+cosmetic only; actual throughput and negotiation are unaffected.
+
+---
 --- a/drivers/net/phy/swphy.c
 +++ b/drivers/net/phy/swphy.c
 @@ -71,6 +71,7 @@ static const struct swmii_regs duplex[] = {
