@@ -26,6 +26,11 @@ CONFIG_PACKAGE_luci=y
 CONFIG_PACKAGE_ppp=y
 CONFIG_PACKAGE_ppp-mod-pppoe=y
 
+# Multi-WAN failover for dual-ISP setups. Pulls kmod-ipt-ipset,
+# kmod-ipt-conntrack-extra, and kmod-ipt-ipopt in via make defconfig.
+CONFIG_PACKAGE_mwan3=y
+CONFIG_PACKAGE_luci-app-mwan3=y
+
 # VPN management UI and baseline WireGuard support.
 CONFIG_PACKAGE_luci-app-strongswan-swanctl=y
 CONFIG_PACKAGE_luci-proto-wireguard=y
