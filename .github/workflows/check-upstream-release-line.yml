@@ -1,0 +1,51 @@
+name: Check for New Upstream OpenWrt Release Line
+
+on:
+  schedule:
+    - cron: "43 2 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-upstream-release-line
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check upstream for a new stable line
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check out workflow branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify external actions are SHA pinned
+        run: |
+          set -euo pipefail
+          failures=0
+          while IFS= read -r ref; do
+            case "$ref" in
+              ./*|docker://*) continue ;;
+            esac
+
+            if ! printf '%s\n' "$ref" | grep -Eq '@[0-9a-f]{40}$'; then
+              printf '::error::External action is not pinned to a full commit SHA: %s\n' "$ref" >&2
+              failures=1
+            fi
+          done < <(grep -RhoE 'uses:[[:space:]]+[^[:space:]#]+' .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null | awk '{ print $2 }')
+
+          exit "$failures"
+
+      - name: Check upstream release lines
+        env:
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/workflows/scripts/check-upstream-release-line.sh

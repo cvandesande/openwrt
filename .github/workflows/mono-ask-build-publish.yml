@@ -1,4 +1,4 @@
-name: Mono ASK Build and Publish
+name: "[Helper] Build and Publish"
 
 on:
   workflow_call:
