@@ -1,4 +1,4 @@
-name: Cut Mono ASK Snapshot Release
+name: On-Demand Mono ASK Build
 
 on:
   workflow_dispatch:
