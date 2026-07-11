@@ -31,12 +31,20 @@ adapting to the new kernel APIs.
  		u32		vlan_all;
 --- a/net/bridge/br_input.c
 +++ b/net/bridge/br_input.c
-@@ -65,6 +65,9 @@
+@@ -65,6 +65,17 @@
  	br_multicast_count(br, NULL, skb, br_multicast_igmp_type(skb),
  			   BR_MCAST_DIR_TX);
  
 +#if IS_ENABLED(CONFIG_NF_CONNTRACK)
-+	skb->layerscape_underlying_iif = indev->ifindex;
++	/*
++	 * Only fill this in if nothing upstream already recorded the
++	 * physical ingress device (e.g. net/core/dev.c). For a VLAN
++	 * device enslaved as a bridge port, indev here is the VLAN
++	 * sub-interface, not the physical carrier CMM/CDX expect; never
++	 * let it clobber a physical ifindex already captured.
++	 */
++	if (!skb->layerscape_underlying_iif)
++		skb->layerscape_underlying_iif = indev->ifindex;
 +#endif
  	BR_INPUT_SKB_CB(skb)->promisc = promisc;
  

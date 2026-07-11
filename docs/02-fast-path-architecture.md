@@ -286,10 +286,12 @@ make CMM issue the private 4RD probe again, but the kernel cannot service it as
 real 4RD support. In that misconfigured state, the SELinux "unrecognized
 netlink message" warning for route-netlink message type `99` can return.
 
-The SELinux route-netlink mapping for the private 4RD messages is also guarded
-behind `CONFIG_CPE_4RD_TUNNEL` or `CONFIG_CPE_4RD_TUNNEL_MODULE`. That keeps the
-default OpenWrt-first kernel unchanged while allowing a future intentional 4RD
-kernel port to label those messages correctly.
+There is currently no SELinux route-netlink mapping for the private 4RD
+messages (`RTM_NEW4RD`/`RTM_DEL4RD`/`RTM_GET4RD`) in the Mono kernel patch
+series — it was removed as dead code gated on the nonexistent
+`CONFIG_CPE_4RD_TUNNEL` symbol. Add that mapping alongside the future
+intentional 4RD kernel port, gated on whatever Kconfig symbol that port
+actually introduces, rather than carrying it ahead of time.
 
 If 4RD needs to be tested, use a temporary test seed rather than the normal
 release seed and enable both sides together:

@@ -214,13 +214,14 @@ adapting to the new kernel APIs.
  	aead = x->data;
 --- a/net/ipv4/Kconfig
 +++ b/net/ipv4/Kconfig
-@@ -380,6 +380,16 @@
+@@ -380,6 +380,17 @@
  
  	  If unsure, say N.
  
 +config INET_IPSEC_OFFLOAD
 +	bool "IP: ASK IPsec hardware offload plumbing"
 +	depends on INET_ESP || INET_AH
++	depends on FSL_SDK_DPAA_ETH
 +	select XFRM
 +	default n
 +	help
@@ -233,13 +234,14 @@ adapting to the new kernel APIs.
  	depends on XFRM && INET_ESP
 --- a/net/ipv6/Kconfig
 +++ b/net/ipv6/Kconfig
-@@ -91,6 +91,16 @@
+@@ -91,6 +91,17 @@
  
  	  If unsure, say N.
  
 +config INET6_IPSEC_OFFLOAD
 +	bool "IPv6: ASK IPsec hardware offload plumbing"
 +	depends on INET6_ESP || INET6_AH
++	depends on FSL_SDK_DPAA_ETH
 +	select XFRM
 +	default n
 +	help
@@ -780,7 +782,7 @@ adapting to the new kernel APIs.
 +		x = xfrm_state_lookup_byhandle(&init_net, notify.sagd);
 +		if (!x)
 +			break;
-+		spin_lock(&x->lock);
++		spin_lock_bh(&x->lock);
 +		if (notify.action) {
 +			x->km.state = XFRM_STATE_EXPIRED;
 +			hrtimer_start(&x->mtimer, 0, HRTIMER_MODE_REL_SOFT);
@@ -788,7 +790,7 @@ adapting to the new kernel APIs.
 +			x->km.dying = 1;
 +			km_state_expired(x, 0, 0);
 +		}
-+		spin_unlock(&x->lock);
++		spin_unlock_bh(&x->lock);
 +		xfrm_state_put(x);
 +		break;
 +	case NLKEY_SA_INFO_UPDATE:
@@ -798,12 +800,12 @@ adapting to the new kernel APIs.
 +		x = xfrm_state_lookup_byhandle(&init_net, info.sagd);
 +		if (!x)
 +			break;
-+		spin_lock(&x->lock);
++		spin_lock_bh(&x->lock);
 +		if (x->curlft.bytes != info.bytes)
 +			x->curr_time = ktime_get_real_seconds();
 +		x->curlft.bytes = info.bytes;
 +		x->curlft.packets = info.packets;
-+		spin_unlock(&x->lock);
++		spin_unlock_bh(&x->lock);
 +		xfrm_state_put(x);
 +		break;
 +	case NLKEY_SA_SET_OFFLOAD:
@@ -816,9 +818,9 @@ adapting to the new kernel APIs.
 +					    notify.sagd, notify.action);
 +			break;
 +		}
-+		spin_lock(&x->lock);
++		spin_lock_bh(&x->lock);
 +		x->offloaded = notify.action ? 1 : 0;
-+		spin_unlock(&x->lock);
++		spin_unlock_bh(&x->lock);
 +		xfrm_state_put(x);
 +		break;
 +	default:
@@ -872,44 +874,24 @@ adapting to the new kernel APIs.
  out_unregister_pernet:
  	unregister_pernet_subsys(&pfkey_net_ops);
  out_unregister_key_proto:
---- a/net/xfrm/xfrm_input.c
-+++ b/net/xfrm/xfrm_input.c
-@@ -15,12 +15,16 @@
- #include <linux/module.h>
- #include <linux/netdevice.h>
- #include <linux/percpu.h>
-+#include <linux/tcp.h>
-+#include <net/checksum.h>
- #include <net/dst.h>
- #include <net/ip.h>
-+#include <net/tcp.h>
- #include <net/xfrm.h>
- #include <net/ip_tunnels.h>
- #include <net/ip6_tunnel.h>
- #include <net/dst_metadata.h>
-+#include <net/ipv6.h>
- #include <net/hotdata.h>
- 
- #include "xfrm_inout.h"
-@@ -44,6 +48,118 @@
- 
- #define XFRM_TRANS_SKB_CB(__skb) ((struct xfrm_trans_cb *)&((__skb)->cb[0]))
+--- a/net/xfrm/xfrm_inout.h
++++ b/net/xfrm/xfrm_inout.h
+@@ -68,3 +68,113 @@
+ }
  
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
-+extern int dpaa_submit_inb_pkt_to_SEC(struct sk_buff *skb, uint16_t sagd);
++#include <linux/tcp.h>
++#include <net/checksum.h>
++#include <net/tcp.h>
 +
-+static unsigned int xfrm_ipsec_native_inner_mtu(struct xfrm_state *x,
-+						struct sk_buff *skb)
++/*
++ * Shared by xfrm_input.c and xfrm_output.c so the ASK native-offload MSS
++ * clamp logic only has one body to carry across kernel refreshes; callers
++ * compute the direction-appropriate mtu (inner vs outer) and pass it in.
++ */
++static inline void xfrm_ipsec_native_mss_clamp(struct sk_buff *skb,
++						unsigned int mtu)
 +{
-+	struct dst_entry *dst = skb_dst(skb);
-+
-+	return dst ? xfrm_state_mtu(x, dst_mtu(dst)) : 0;
-+}
-+
-+static void xfrm_ipsec_native_mss_clamp(struct xfrm_state *x,
-+					struct sk_buff *skb)
-+{
-+	unsigned int mtu = xfrm_ipsec_native_inner_mtu(x, skb);
 +	unsigned int tcp_hdrlen;
 +	unsigned int thoff;
 +	struct tcphdr *th;
@@ -1007,6 +989,42 @@ adapting to the new kernel APIs.
 +}
 +#endif
 +
+ #endif
+--- a/net/xfrm/xfrm_input.c
++++ b/net/xfrm/xfrm_input.c
+@@ -15,12 +15,16 @@
+ #include <linux/module.h>
+ #include <linux/netdevice.h>
+ #include <linux/percpu.h>
++#include <linux/tcp.h>
++#include <net/checksum.h>
+ #include <net/dst.h>
+ #include <net/ip.h>
++#include <net/tcp.h>
+ #include <net/xfrm.h>
+ #include <net/ip_tunnels.h>
+ #include <net/ip6_tunnel.h>
+ #include <net/dst_metadata.h>
++#include <net/ipv6.h>
+ #include <net/hotdata.h>
+ 
+ #include "xfrm_inout.h"
+@@ -44,6 +48,18 @@
+ 
+ #define XFRM_TRANS_SKB_CB(__skb) ((struct xfrm_trans_cb *)&((__skb)->cb[0]))
+ 
++#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
++extern int dpaa_submit_inb_pkt_to_SEC(struct sk_buff *skb, uint16_t sagd);
++
++static unsigned int xfrm_ipsec_native_inner_mtu(struct xfrm_state *x,
++						struct sk_buff *skb)
++{
++	struct dst_entry *dst = skb_dst(skb);
++
++	return dst ? xfrm_state_mtu(x, dst_mtu(dst)) : 0;
++}
++#endif
++
  static DEFINE_SPINLOCK(xfrm_input_afinfo_lock);
  static struct xfrm_input_afinfo const __rcu *xfrm_input_afinfo[2][AF_INET6 + 1];
  
@@ -1029,17 +1047,17 @@ adapting to the new kernel APIs.
  		spin_lock(&x->lock);
  
 @@ -684,6 +811,11 @@
- 		}
  
  		xfrm_replay_advance(x, seq);
+ 
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
 +		if (x->offloaded)
-+			xfrm_ipsec_native_mss_clamp(x, skb);
++			xfrm_ipsec_native_mss_clamp(skb, xfrm_ipsec_native_inner_mtu(x, skb));
 +#endif
 +
- 
  		x->curlft.bytes += skb->len;
  		x->curlft.packets++;
+ 		x->lastused = ktime_get_real_seconds();
 --- a/net/xfrm/xfrm_output.c
 +++ b/net/xfrm/xfrm_output.c
 @@ -12,10 +12,16 @@
@@ -1059,7 +1077,7 @@ adapting to the new kernel APIs.
  #include <net/xfrm.h>
  
  #if IS_ENABLED(CONFIG_IPV6)
-@@ -28,6 +34,181 @@
+@@ -28,6 +34,81 @@
  static int xfrm_output2(struct net *net, struct sock *sk, struct sk_buff *skb);
  static int xfrm_inner_extract_output(struct xfrm_state *x, struct sk_buff *skb);
  
@@ -1097,106 +1115,6 @@ adapting to the new kernel APIs.
 +
 +	return dst ? xfrm_ipsec_native_mtu_margin(
 +		     xfrm_state_mtu(x, dst_mtu(dst))) : 0;
-+}
-+
-+static void xfrm_ipsec_native_mss_clamp(struct xfrm_state *x,
-+					struct sk_buff *skb)
-+{
-+	unsigned int mtu = xfrm_ipsec_native_mtu(x, skb);
-+	unsigned int tcp_hdrlen;
-+	unsigned int thoff;
-+	struct tcphdr *th;
-+	u16 newmss;
-+	u8 *opt;
-+	int i;
-+
-+	if (!mtu)
-+		return;
-+
-+	switch (skb->protocol) {
-+	case htons(ETH_P_IP):
-+		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
-+			return;
-+		if (ip_hdr(skb)->protocol != IPPROTO_TCP || ip_is_fragment(ip_hdr(skb)))
-+			return;
-+		thoff = ip_hdrlen(skb);
-+		break;
-+#if IS_ENABLED(CONFIG_IPV6)
-+	case htons(ETH_P_IPV6): {
-+		__be16 frag_off;
-+		u8 nexthdr;
-+		int offset;
-+
-+		if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
-+			return;
-+
-+		nexthdr = ipv6_hdr(skb)->nexthdr;
-+		offset = ipv6_skip_exthdr(skb, sizeof(struct ipv6hdr),
-+					  &nexthdr, &frag_off);
-+		if (offset < 0 || nexthdr != IPPROTO_TCP || frag_off)
-+			return;
-+
-+		thoff = offset;
-+		break;
-+	}
-+#endif
-+	default:
-+		return;
-+	}
-+
-+	if (!pskb_may_pull(skb, thoff + sizeof(struct tcphdr)))
-+		return;
-+	if (skb_ensure_writable(skb, thoff + sizeof(struct tcphdr)))
-+		return;
-+
-+	th = (struct tcphdr *)(skb_network_header(skb) + thoff);
-+	if (!th->syn || th->rst)
-+		return;
-+
-+	tcp_hdrlen = th->doff * 4;
-+	if (tcp_hdrlen < sizeof(struct tcphdr))
-+		return;
-+	if (!pskb_may_pull(skb, thoff + tcp_hdrlen))
-+		return;
-+	if (skb_ensure_writable(skb, thoff + tcp_hdrlen))
-+		return;
-+
-+	th = (struct tcphdr *)(skb_network_header(skb) + thoff);
-+	if (mtu <= thoff + tcp_hdrlen || mtu - thoff - tcp_hdrlen > U16_MAX)
-+		return;
-+	newmss = mtu - thoff - tcp_hdrlen;
-+	opt = (u8 *)th;
-+
-+	for (i = sizeof(struct tcphdr); i < tcp_hdrlen;) {
-+		unsigned int optlen;
-+		u16 oldmss;
-+
-+		if (opt[i] == TCPOPT_EOL)
-+			break;
-+		if (opt[i] == TCPOPT_NOP) {
-+			i++;
-+			continue;
-+		}
-+		if (i + 1 >= tcp_hdrlen)
-+			break;
-+
-+		optlen = opt[i + 1];
-+		if (optlen < 2 || i + optlen > tcp_hdrlen)
-+			break;
-+
-+		if (opt[i] == TCPOPT_MSS && optlen == TCPOLEN_MSS) {
-+			oldmss = (opt[i + 2] << 8) | opt[i + 3];
-+			if (oldmss <= newmss)
-+				return;
-+			opt[i + 2] = newmss >> 8;
-+			opt[i + 3] = newmss & 0xff;
-+			inet_proto_csum_replace2(&th->check, skb,
-+						 htons(oldmss), htons(newmss),
-+						 false);
-+			return;
-+		}
-+		i += optlen;
-+	}
 +}
 +
 +static bool xfrm_ipsec_native_gso_prepare(struct xfrm_state *x,
@@ -1315,7 +1233,7 @@ adapting to the new kernel APIs.
 +			skb->ipsec_sa_handle = x->handle;
 +			skb->ipsec_xfrm_dir |= 1 << XFRM_POLICY_OUT;
 +
-+			xfrm_ipsec_native_mss_clamp(x, skb);
++			xfrm_ipsec_native_mss_clamp(skb, xfrm_ipsec_native_mtu(x, skb));
 +			err = xfrm_outer_mode_output(x, skb);
 +			if (err) {
 +				XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTSTATEMODEERROR);
@@ -1599,7 +1517,7 @@ adapting to the new kernel APIs.
  }
  
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
-+static u16 xfrm_state_handle;
++static atomic_t xfrm_state_handle = ATOMIC_INIT(0);
 +#endif
 +
  static inline unsigned int xfrm_dst_hash(struct net *net,
@@ -1685,7 +1603,7 @@ adapting to the new kernel APIs.
  	net->xfrm.state_hmask = nhashmask;
  
  	write_seqcount_end(&net->xfrm.xfrm_state_hash_generation);
-@@ -219,7 +257,28 @@
+@@ -219,7 +257,39 @@
  	xfrm_hash_free(osrc, osize);
  	xfrm_hash_free(ospi, osize);
  	xfrm_hash_free(oseq, osize);
@@ -1697,6 +1615,7 @@ adapting to the new kernel APIs.
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
 +static void xfrm_state_insert_byhandle(struct net *net, struct xfrm_state *x)
 +{
++	struct xfrm_state *conflict;
 +	unsigned int h;
 +
 +	lockdep_assert_held(&net->xfrm.xfrm_state_lock);
@@ -1704,7 +1623,17 @@ adapting to the new kernel APIs.
 +	if (!x->handle || x->in_byh_hash)
 +		return;
 +
++again:
 +	h = x->handle & net->xfrm.state_hmask;
++	hlist_for_each_entry(conflict, net->xfrm.state_byh + h, byh) {
++		if (conflict->handle != x->handle)
++			continue;
++		do {
++			x->handle = (u16)atomic_inc_return(&xfrm_state_handle);
++		} while (x->handle == 0);
++		goto again;
++	}
++
 +	hlist_add_head_rcu(&x->byh, net->xfrm.state_byh + h);
 +	x->in_byh_hash = 1;
  }
@@ -1730,7 +1659,7 @@ adapting to the new kernel APIs.
  		x->replay_maxdiff = 0;
 +#if defined(CONFIG_INET_IPSEC_OFFLOAD) || defined(CONFIG_INET6_IPSEC_OFFLOAD)
 +		do {
-+			x->handle = xfrm_state_handle++;
++			x->handle = (u16)atomic_inc_return(&xfrm_state_handle);
 +		} while (x->handle == 0);
 +		x->in_byh_hash = 0;
 +#endif
@@ -1842,7 +1771,7 @@ adapting to the new kernel APIs.
  			spin_unlock_bh(&net->xfrm.xfrm_state_lock);
  			err = 0;
  			goto unlock;
-@@ -3294,6 +3407,12 @@
+@@ -3294,6 +3407,17 @@
  	net->xfrm.state_byseq = xfrm_hash_alloc(sz);
  	if (!net->xfrm.state_byseq)
  		goto out_byseq;
@@ -1850,7 +1779,12 @@ adapting to the new kernel APIs.
 +	net->xfrm.state_byh = xfrm_hash_alloc(sz);
 +	if (!net->xfrm.state_byh)
 +		goto out_byh;
-+	get_random_bytes(&xfrm_state_handle, sizeof(xfrm_state_handle));
++	{
++		u16 seed;
++
++		get_random_bytes(&seed, sizeof(seed));
++		atomic_set(&xfrm_state_handle, seed);
++	}
 +#endif
  
  	net->xfrm.state_cache_input = alloc_percpu(struct hlist_head);

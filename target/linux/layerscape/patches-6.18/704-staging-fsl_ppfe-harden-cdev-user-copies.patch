@@ -1,0 +1,111 @@
+From: Mono OpenWrt Integration <integration@mono.local>
+Date: Sat, 11 Jul 2026 00:00:00 +0100
+Subject: [PATCH] staging: fsl_ppfe: harden pfe_cdev user-copy paths
+
+pfe_cdev_read()/pfe_cdev_ioctl() copy fixed-size kernel data to/from a
+userspace pointer without validating the caller-supplied buffer length
+or using the __user-annotated accessors:
+
+- pfe_cdev_read() copied sizeof(link_states) bytes into the caller's
+  buffer without checking that len (the size the caller claims its
+  buffer is) is actually that large.
+- The ETH0/ETH1 state and HIF_INTR_EN ioctl paths dereferenced the
+  __user pointer directly (*argp = ...) instead of using put_user()/
+  get_user(), which both misses sparse/access_ok() checking and can
+  fault the kernel on a bad userspace pointer instead of returning
+  -EFAULT.
+- The HIF_INTR_EN error path could fall through to the coalescing
+  writel() after freeing g_trigger on irq request failure.
+
+Add a buffer-size check, __user annotation on the read() buffer
+argument, put_user()/get_user() for the ioctl paths, and the missing
+break. This is layered on top of the byte-exact upstream 701/703 so
+future refreshes of those (large, upstream-shared) patches stay a
+straight rebase instead of silently swallowing this hardening.
+
+---
+--- a/drivers/staging/fsl_ppfe/pfe_cdev.c
++++ b/drivers/staging/fsl_ppfe/pfe_cdev.c
+@@ -29,7 +29,7 @@
+ 	return 0;
+ }
+ 
+-static ssize_t pfe_cdev_read(struct file *fp, char *buf,
++static ssize_t pfe_cdev_read(struct file *fp, char __user *buf,
+ 			     size_t len, loff_t *off)
+ {
+ 	int ret = 0;
+@@ -44,8 +44,14 @@
+ 		pr_debug("\n");
+ 	}
+ 
++	if (len < sizeof(link_states)) {
++		pr_err("User buffer too small (%zu) for (%zu) bytes.\n",
++		       len, sizeof(link_states));
++		return -EINVAL;
++	}
++
+ 	/* Copy to user the value in buffer sized len */
+-	ret = copy_to_user(buf, &link_states, sizeof(link_states));
++	ret = copy_to_user(buf, link_states, sizeof(link_states));
+ 	if (ret != 0) {
+ 		pr_err("Failed to send (%d)bytes of (%zu) requested.\n",
+ 		       ret, len);
+@@ -120,6 +126,7 @@
+ 			   unsigned long arg)
+ {
+ 	int ret = -EFAULT;
++	int eventfd;
+ 	int __user *argp = (int __user *)arg;
+ 
+ 	pr_debug("PFE CDEV IOCTL Called with cmd=(%u)\n", cmd);
+@@ -127,21 +134,31 @@
+ 	switch (cmd) {
+ 	case PFE_CDEV_ETH0_STATE_GET:
+ 		/* Return an unsigned int (link state) for ETH0 */
+-		*argp = link_states[0].state;
+-		pr_debug("Returning state=%d for ETH0\n", *argp);
+-		ret = 0;
++		ret = put_user(link_states[0].state, argp);
++		if (ret)
++			break;
++		pr_debug("Returning state=%u for ETH0\n",
++			 link_states[0].state);
+ 		break;
+ 	case PFE_CDEV_ETH1_STATE_GET:
+-		/* Return an unsigned int (link state) for ETH0 */
+-		*argp = link_states[1].state;
+-		pr_debug("Returning state=%d for ETH1\n", *argp);
+-		ret = 0;
++		/* Return an unsigned int (link state) for ETH1 */
++		ret = put_user(link_states[1].state, argp);
++		if (ret)
++			break;
++		pr_debug("Returning state=%u for ETH1\n",
++			 link_states[1].state);
+ 		break;
+ 	case PFE_CDEV_HIF_INTR_EN:
+ 		/* Return success/failure */
+-		g_trigger = eventfd_ctx_fdget(*argp);
+-		if (IS_ERR(g_trigger))
+-			return PTR_ERR(g_trigger);
++		ret = get_user(eventfd, argp);
++		if (ret)
++			break;
++		g_trigger = eventfd_ctx_fdget(eventfd);
++		if (IS_ERR(g_trigger)) {
++			ret = PTR_ERR(g_trigger);
++			g_trigger = NULL;
++			break;
++		}
+ 		ret = request_irq(pfe->hif_irq, hif_us_isr, 0, "pfe_hif",
+ 				  g_trigger);
+ 		if (ret) {
+@@ -149,6 +166,7 @@
+ 			       __func__, pfe->hif_irq);
+ 			eventfd_ctx_put(g_trigger);
+ 			g_trigger = NULL;
++			break;
+ 		}
+ 		writel((PFE_INTR_COAL_USECS * (pfe->ctrl.sys_clk / 1000)) |
+ 			HIF_INT_COAL_ENABLE, HIF_INT_COAL);
