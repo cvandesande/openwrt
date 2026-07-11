@@ -1,4 +1,4 @@
-name: Mono ASK Release Build
+name: Rebuild Mono ASK Release
 
 on:
   workflow_dispatch:
