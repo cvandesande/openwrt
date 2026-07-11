@@ -121,6 +121,8 @@ jobs:
           path: |
             /tmp/${{ env.CANDIDATE_BUNDLE }}
             /tmp/${{ env.CANDIDATE_BUNDLE }}.sha256
+            /tmp/mono-ask-sha-maps/oss.tsv
+            /tmp/mono-ask-sha-maps/ask.tsv
 
   build-and-publish:
     name: Build and publish release candidate
