@@ -34,6 +34,7 @@ STABLE_BASE_BRANCH="${STABLE_BASE_BRANCH:?STABLE_BASE_BRANCH is required}"
 STABLE_OSS_BRANCH="${STABLE_OSS_BRANCH:?STABLE_OSS_BRANCH is required}"
 STABLE_ASK_BRANCH="${STABLE_ASK_BRANCH:?STABLE_ASK_BRANCH is required}"
 UPSTREAM_EXCLUDE_PATHS="${UPSTREAM_EXCLUDE_PATHS:-.github/workflows .github/llm-review-rules.md}"
+SHA_MAP_DIR="${SHA_MAP_DIR:-/tmp/mono-ask-sha-maps}"
 
 summary() {
 	if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
@@ -143,6 +144,39 @@ commit_if_needed() {
 	fi
 }
 
+# Records old-SHA -> new-SHA -> subject for every commit replayed by a rebase,
+# so release notes can cite the pre-rebase commit a contributor actually
+# pushed alongside the rebased SHA that ends up in a release. Rebases don't
+# preserve or expose this mapping on their own, and the pre-rebase remote
+# refs the old range is read from stay resolvable for the life of the job, so
+# this is safe to compute right after each rebase rather than snapshotting
+# beforehand.
+write_sha_map() {
+	local name="$1"
+	local old_range="$2"
+	local new_range="$3"
+	local out="${SHA_MAP_DIR}/${name}.tsv"
+	local old_file new_file old_count new_count
+
+	mkdir -p "$SHA_MAP_DIR"
+	: > "$out"
+
+	old_file="$(mktemp)"
+	new_file="$(mktemp)"
+	git log --no-merges --reverse --pretty=tformat:'%H%x09%s' "$old_range" > "$old_file"
+	git log --no-merges --reverse --pretty=tformat:'%H%x09%s' "$new_range" > "$new_file"
+	old_count="$(wc -l < "$old_file")"
+	new_count="$(wc -l < "$new_file")"
+
+	if [ "$old_count" = "$new_count" ] && [ "$old_count" -gt 0 ]; then
+		paste "$new_file" "$old_file" | awk -F'\t' '{ print $1 "\t" $3 "\t" $2 }' > "$out"
+	elif [ "$old_count" != "$new_count" ]; then
+		printf '::warning::Skipping %s SHA map: pre-rebase commit count (%s) does not match post-rebase count (%s)\n' "$name" "$old_count" "$new_count" >&2
+	fi
+
+	rm -f "$old_file" "$new_file"
+}
+
 if ! printf '%s\n' "$UPSTREAM_TAG" | grep -Eq '^v[0-9]+[.][0-9]+[.][0-9]+$'; then
 	printf '::error::Unexpected upstream tag format: %s\n' "$UPSTREAM_TAG" >&2
 	exit 1
@@ -208,10 +242,12 @@ base_sha="$(git rev-parse HEAD)"
 git switch --force-create "$oss_branch" "$(remote_ref "$STABLE_OSS_BRANCH")"
 run_rebase "$oss_branch" --onto "$base_branch" "$(remote_ref "$STABLE_BASE_BRANCH")"
 oss_sha="$(git rev-parse HEAD)"
+write_sha_map "oss" "$(remote_ref "$STABLE_BASE_BRANCH")..$(remote_ref "$STABLE_OSS_BRANCH")" "${base_branch}..${oss_branch}"
 
 git switch --force-create "$ask_branch" "$(remote_ref "$STABLE_ASK_BRANCH")"
 run_rebase "$ask_branch" --onto "$oss_branch" "$(remote_ref "$STABLE_OSS_BRANCH")"
 ask_sha="$(git rev-parse HEAD)"
+write_sha_map "ask" "$(remote_ref "$STABLE_OSS_BRANCH")..$(remote_ref "$STABLE_ASK_BRANCH")" "${oss_branch}..${ask_branch}"
 
 set_output upstream_tag "$UPSTREAM_TAG"
 set_output upstream_sha "$upstream_sha"
