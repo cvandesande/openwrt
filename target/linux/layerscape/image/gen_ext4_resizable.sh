@@ -1,6 +1,6 @@
 #!/bin/bash
 # Creates an ext4 image with resize_inode support and proper GDT reservation
-# Usage: gen_ext4_resizable.sh <output> <size_bytes> <blocksize> <source_dir> [reserved_pct] [setfiles]
+# Usage: gen_ext4_resizable.sh <output> <size_bytes> <blocksize> <source_dir> [reserved_pct] [journal|nojournal] [setfiles]
 # Note: Uses mkfs.ext4 -d (e2fsprogs 1.43+) - no root required
 
 set -e
@@ -10,7 +10,8 @@ SIZE="$2"
 BLOCKSIZE="$3"
 SOURCE_DIR="$4"
 RESERVED_PCT="${5:-0}"
-SETFILES="${6:-}"
+JOURNAL="${6:-nojournal}"
+SETFILES="${7:-}"
 
 TMPFILE="${OUTPUT}.tmp"
 OWNER_CMDS="${OUTPUT}.owner.cmds"
@@ -33,10 +34,18 @@ truncate -s "$INITIAL_SIZE" "$TMPFILE"
 # Create ext4 filesystem with:
 # - resize_inode: enables online resize
 # - resize=32G: reserves GDT blocks for future expansion to 32GB
-# - ^has_journal: no journal (saves ~128MB, OpenWRT doesn't need it for rootfs)
+# - has_journal per CONFIG_TARGET_EXT4_JOURNAL (rootfs is a writable ext4 on
+#   eMMC taking live UCI commits; without a journal an unclean power-off can
+#   corrupt it)
 #
 # When SELinux labels are requested, setfiles and mkfs.ext4 must run in the
 # same fakeroot session so mkfs.ext4 can see the fake security.selinux xattrs.
+if [ "$JOURNAL" = "journal" ]; then
+    FEATURES="resize_inode,has_journal"
+else
+    FEATURES="resize_inode,^has_journal"
+fi
+
 fakeroot -- sh -c '
 set -e
 source_dir="$1"
@@ -44,6 +53,7 @@ setfiles="$2"
 tmpfile="$3"
 blocksize="$4"
 reserved_pct="$5"
+features="$6"
 
 if [ -n "$setfiles" ]; then
     if [ ! -f "$source_dir/etc/selinux/config" ]; then
@@ -61,12 +71,12 @@ if [ -n "$setfiles" ]; then
     "$setfiles" -r "$source_dir" "$file_contexts" "$source_dir"
 fi
 
-mkfs.ext4 -F -L rootfs -O resize_inode,^has_journal \
+mkfs.ext4 -F -L rootfs -O "$features" \
     -E resize=34359738368 \
     -b "$blocksize" -m "$reserved_pct" \
     -d "$source_dir" \
     "$tmpfile"
-' sh "$SOURCE_DIR" "$SETFILES" "$TMPFILE" "$BLOCKSIZE" "$RESERVED_PCT"
+' sh "$SOURCE_DIR" "$SETFILES" "$TMPFILE" "$BLOCKSIZE" "$RESERVED_PCT" "$FEATURES"
 
 # setfiles must run in fakeroot for SELinux xattrs, but that makes mkfs.ext4
 # record the build user's uid/gid. Normalize image ownership afterwards without
