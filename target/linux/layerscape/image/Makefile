@@ -86,6 +86,7 @@ define Build/mono-mkfs-ext4
 		$@ $(ROOTFS_PARTSIZE) $(CONFIG_TARGET_EXT4_BLOCKSIZE) \
 		$(mkfs_cur_target_dir) \
 		$(if $(CONFIG_TARGET_EXT4_RESERVED_PCT),$(CONFIG_TARGET_EXT4_RESERVED_PCT),0) \
+		$(if $(CONFIG_TARGET_EXT4_JOURNAL),journal,nojournal) \
 		$(if $(CONFIG_TARGET_ROOTFS_SECURITY_LABELS),$(STAGING_DIR_HOST)/bin/setfiles)
 endef
 
