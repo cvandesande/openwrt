@@ -1,0 +1,16 @@
+--- a/dpa_app-4.03.0/Makefile
++++ b/dpa_app-4.03.0/Makefile
+@@ -10,7 +10,12 @@
+ #/*
+ #* Copyright (c) 2014 Freescale Semiconductor, Inc. All rights reserved.
+ #*/
+-OBJS = main.o dpa.o testapp.o
++#
++# testapp.o dropped: it is dead code (main.c only calls test_app_init() under
++# #ifdef ENABLE_TESTAPP, which is not defined) and references
++# struct test_flow_info / CDX_CTRL_DPA_CONNADD, both removed from
++# cdx_ioctl.h as unused debug-only ioctl surface during CDX hardening.
++OBJS = main.o dpa.o
+ TARGET = dpa_app
+ 
+ all:	$(TARGET)

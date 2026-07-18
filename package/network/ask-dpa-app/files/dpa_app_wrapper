@@ -1,15 +1,10 @@
 #!/bin/sh
-# Wrapper script for dpa_app. Set ASK_DPA_APP_DEBUG=1 to capture debug logs.
+# Wrapper script for dpa_app. Always logs to $LOG (the kernel's
+# call_usermodehelper launch at boot doesn't set ASK_DPA_APP_DEBUG, so
+# gating logging behind it meant boot-time failures were never captured).
+# Set ASK_DPA_APP_DEBUG=1 to additionally capture an strace.
 LOG=/tmp/dpa_app.log
 CFG_DIR=/usr/share/ask-dpa-app
-
-case "$ASK_DPA_APP_DEBUG" in
-1|yes|true|on)
-	;;
-*)
-	exec /usr/bin/dpa_app "$@"
-	;;
-esac
 
 echo "=== dpa_app wrapper started at $(date) ===" >> "$LOG"
 echo "Args: $@" >> "$LOG"
@@ -27,13 +22,21 @@ echo "Environment:" >> "$LOG"
 env >> "$LOG" 2>&1
 echo "=== Running dpa_app ===" >> "$LOG"
 
-if [ -x /usr/bin/strace ]; then
-	/usr/bin/strace -f -o /tmp/dpa_app_strace.log /usr/bin/dpa_app "$@" >> "$LOG" 2>&1
-	RC=$?
-else
+case "$ASK_DPA_APP_DEBUG" in
+1|yes|true|on)
+	if [ -x /usr/bin/strace ]; then
+		/usr/bin/strace -f -o /tmp/dpa_app_strace.log /usr/bin/dpa_app "$@" >> "$LOG" 2>&1
+		RC=$?
+	else
+		/usr/bin/dpa_app "$@" >> "$LOG" 2>&1
+		RC=$?
+	fi
+	;;
+*)
 	/usr/bin/dpa_app "$@" >> "$LOG" 2>&1
 	RC=$?
-fi
+	;;
+esac
 
 echo "=== dpa_app exited with code $RC ===" >> "$LOG"
 exit $RC
