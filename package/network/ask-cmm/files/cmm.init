@@ -7,52 +7,14 @@
 # See /LICENSE for more information.
 #
 
+USE_PROCD=1
 START=54
 STOP=46
 
 CONF=/etc/config/fastforward
-OPTIONS="-f $CONF"
-CMM_PID=/var/run/cmm.pid
-CMM_START_LOG=/tmp/cmm-start.log
-CMM_START_RETRIES="${CMM_START_RETRIES:-10}"
-CMM_START_DELAY="${CMM_START_DELAY:-1}"
-
-# Read nf_conntrack_max from sysctl config
-NF_CONNTRACK_MAX=$(grep "nf_conntrack_max" /etc/sysctl.d/11-nf-conntrack.conf 2>/dev/null | cut -d'=' -f 2)
-if [ -n "$NF_CONNTRACK_MAX" ] && [ "$NF_CONNTRACK_MAX" -gt 0 ] 2>/dev/null; then
-	OPTIONS="$OPTIONS -n $NF_CONNTRACK_MAX"
-fi
 
 fastpath_disabled() {
 	[ -e /proc/fppmode ] && grep -q "0" /proc/fppmode
-}
-
-cmm_pid() {
-	[ -f "$CMM_PID" ] && cat "$CMM_PID" 2>/dev/null
-}
-
-cmm_pid_is_running() {
-	pid="$(cmm_pid)"
-	[ -n "$pid" ] || return 1
-	[ -d "/proc/$pid" ] || return 1
-
-	comm="$(cat "/proc/$pid/comm" 2>/dev/null)"
-	[ "$comm" = "cmm" ] && return 0
-
-	cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
-	case "$cmdline" in
-		*"/usr/sbin/cmm"*|*" cmm "*) return 0 ;;
-	esac
-
-	return 1
-}
-
-remove_stale_pid() {
-	[ -f "$CMM_PID" ] || return 0
-	cmm_pid_is_running && return 0
-
-	logger -t cmm "removing stale pid file $CMM_PID ($(cmm_pid))"
-	rm -f "$CMM_PID"
 }
 
 load_netfilter_modules() {
@@ -67,24 +29,19 @@ load_netfilter_modules() {
 
 # Platform detection for VWD fast path control
 CMM_CREATED_VWD_DEV=""
-if [ -e /proc/device-tree/model ]; then
-	if grep -q "LS1012A" /proc/device-tree/model; then
-		VWD_ENABLE_FASTPATH=/sys/devices/platform/4000000.pfe/vwd_fast_path_enable
-		CMM_CREATED_VWD_DEV="Y"
-	elif grep -q "LS1043A\|LS1046A" /proc/device-tree/model; then
-		VWD_ENABLE_FASTPATH=/sys/class/vwd/vwd0/vwd_fast_path_enable
-	else
-		VWD_ENABLE_FASTPATH=/sys/class/vwd/vwd0/vwd_fast_path_enable
-	fi
+if [ -e /proc/device-tree/model ] && grep -q "LS1012A" /proc/device-tree/model; then
+	VWD_ENABLE_FASTPATH=/sys/devices/platform/4000000.pfe/vwd_fast_path_enable
+	CMM_CREATED_VWD_DEV="Y"
 else
 	VWD_ENABLE_FASTPATH=/sys/class/vwd/vwd0/vwd_fast_path_enable
 fi
 
-start() {
-	# Check if fast path is disabled
-	if fastpath_disabled; then
-		exit 0
-	fi
+start_service() {
+	local options="-F -f $CONF"
+	local nf_conntrack_max
+	local major
+
+	fastpath_disabled && return 0
 
 	# Create VWD device node if needed (LS1012A)
 	if [ "$CMM_CREATED_VWD_DEV" = "Y" ]; then
@@ -98,57 +55,40 @@ start() {
 	# Enable fast path
 	[ -e "$VWD_ENABLE_FASTPATH" ] && echo 1 > "$VWD_ENABLE_FASTPATH"
 
-	# Load netfilter modules
 	load_netfilter_modules
 
-	# Start CMM daemon
-	[ -d /var/run ] || mkdir -p /var/run
-	remove_stale_pid
-	if cmm_pid_is_running; then
-		logger -t cmm "already running as pid $(cmm_pid)"
-		return 0
+	# Read nf_conntrack_max from sysctl config
+	nf_conntrack_max=$(grep "nf_conntrack_max" /etc/sysctl.d/11-nf-conntrack.conf 2>/dev/null | cut -d'=' -f 2)
+	if [ -n "$nf_conntrack_max" ] && [ "$nf_conntrack_max" -gt 0 ] 2>/dev/null; then
+		options="$options -n $nf_conntrack_max"
 	fi
 
-	attempt=1
-	while [ "$attempt" -le "$CMM_START_RETRIES" ]; do
-		/usr/sbin/cmm $OPTIONS >>"$CMM_START_LOG" 2>&1
-		sleep "$CMM_START_DELAY"
+	procd_open_instance
+	procd_set_param command /usr/sbin/cmm $options
+	# respawn: healthy after 10s up, retry every 5s, 0 = never give up.
+	# A cmm crash must not leave fast path silently disabled.
+	procd_set_param respawn 10 5 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
 
-		if cmm_pid_is_running; then
-			logger -t cmm "started as pid $(cmm_pid) after attempt $attempt"
-
-			# Restart QoS if present
-			[ -e /etc/init.d/qos ] && sleep 1 && /etc/init.d/qos restart
-			return 0
-		fi
-
-		remove_stale_pid
-		logger -t cmm "start attempt $attempt failed; see $CMM_START_LOG"
-		attempt=$((attempt + 1))
-	done
-
-	logger -t cmm "failed to start after $CMM_START_RETRIES attempts; see $CMM_START_LOG"
-	return 1
+	# Restart QoS if present
+	[ -e /etc/init.d/qos ] && (sleep 2; /etc/init.d/qos restart) &
 }
 
-stop() {
-	# Check if fast path is disabled
-	if fastpath_disabled; then
-		exit 0
-	fi
+stop_service() {
+	fastpath_disabled && return 0
 
-	# Stop CMM daemon
-	if cmm_pid_is_running; then
-		kill "$(cmm_pid)" >/dev/null 2>&1
-	fi
-	rm -f "$CMM_PID"
-
-	# Unload netfilter modules
-	rmmod nf_conntrack_netlink 2>/dev/null
-	rmmod nf_nat 2>/dev/null
-	rmmod nf_conntrack_ipv6 2>/dev/null
-	rmmod nf_conntrack_ipv4 2>/dev/null
-	rmmod nfnetlink 2>/dev/null
+	# Best-effort module cleanup shortly after cmm exits; failures are
+	# harmless if something else still holds the conntrack modules.
+	(
+		sleep 1
+		rmmod nf_conntrack_netlink 2>/dev/null
+		rmmod nf_nat 2>/dev/null
+		rmmod nf_conntrack_ipv6 2>/dev/null
+		rmmod nf_conntrack_ipv4 2>/dev/null
+		rmmod nfnetlink 2>/dev/null
+	) &
 
 	# Disable fast path
 	[ -e "$VWD_ENABLE_FASTPATH" ] && echo 0 > "$VWD_ENABLE_FASTPATH"
@@ -157,14 +97,4 @@ stop() {
 	if [ "$CMM_CREATED_VWD_DEV" = "Y" ]; then
 		rm -f /dev/vwd0
 	fi
-}
-
-status() {
-	if cmm_pid_is_running; then
-		echo "running as pid $(cmm_pid)"
-		return 0
-	fi
-
-	echo "not running"
-	return 1
 }
