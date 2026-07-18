@@ -9,7 +9,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ask-dpa-app
 PKG_VERSION:=4.03.0
-PKG_RELEASE:=2
+PKG_RELEASE:=4
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/we-are-mono/ASK.git
