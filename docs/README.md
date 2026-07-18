@@ -31,6 +31,11 @@ Optional developer tooling:
   Local `clangd` and `compile_commands.json` workflow for navigating the
   kernel and ASK package C code, plus notes on building this fork on NixOS.
 
+- [05-sfp-module-diagnostics.md](05-sfp-module-diagnostics.md)
+  On-device SFP+ module diagnostics with `i2csfp`: why ethtool cannot see
+  the modules on this driver stack, the cage I2C bus map, and copper-module
+  PHY access (Rollball) for real link-state visibility.
+
 - [codeql-scoped-analysis.md](codeql-scoped-analysis.md)
   Scoped CodeQL database and SARIF workflow for ASK package integrations and
   the optional ASK kernel patch surface.
