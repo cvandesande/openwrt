@@ -269,16 +269,27 @@
 		reg = <0xdc000 0x1000>;
 	};
 
+	/*
+	 * sdk_dpaa doesn't implement phylink, so managed = "in-band-status"
+	 * never completes: the SFP-bus upstream attach it depends on never
+	 * happens, which leaves the sff,sfp cage driver stuck in "waitdev"
+	 * forever and tx_disable asserted on both ports (found 2026-07-18
+	 * testing DAC loopback). fixed-link + xgmii is the confirmed-working
+	 * config (commit fffea71, "layerscape: fix SFP+ ports on Mono
+	 * Gateway DK") -- swphy's fixed-link path doesn't need an SFP-bus
+	 * attach at all. The two real CDX oopses (find_osdev_by_fman_params-
+	 * bug) were both fully explained by unrelated ask-cdx bugs before
+	 * mac.c's probe logic was ever reached, so this was never
+	 * load-bearing for that fix.
+	 */
 	ethernet@f0000 {
-		/delete-property/ fixed-link;
 		phy-connection-type = "xgmii";
-			fixed-link = <0 1 10000 0 0>;
+		fixed-link = <0 1 10000 0 0>;
 	};
 
 	ethernet@f2000 {
-		/delete-property/ fixed-link;
 		phy-connection-type = "xgmii";
-			fixed-link = <0 1 10000 0 0>;
+		fixed-link = <0 1 10000 0 0>;
 	};
 
 	/* DPA offline-port bindings consumed by ask-dpa-app/CDX. */
