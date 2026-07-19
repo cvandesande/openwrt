@@ -1,0 +1,20 @@
+#!/bin/sh
+# Ship mwan3 inert by default.
+#
+# The feed's default config enables tracking on 'wan', so a stock flash
+# immediately runs mwan3track and fires iptables/ipset from the interface
+# hotplug path even though no multi-WAN policy has been configured (and
+# 'wanb' doesn't exist as a network interface). Disable the only enabled
+# section so mwan3 does nothing until someone deliberately configures it.
+#
+# uci-defaults re-run after every sysupgrade, so guard with a marker kept
+# in the preserved config: a user who later enables mwan3 must not have it
+# silently re-disabled by the next flash.
+[ -f /etc/config/mwan3 ] || exit 0
+if [ "$(uci -q get mwan3.globals.mono_default_disabled)" != "1" ]; then
+	uci -q set mwan3.wan.enabled='0'
+	uci set mwan3.globals.mono_default_disabled='1'
+	uci commit mwan3
+fi
+
+exit 0
