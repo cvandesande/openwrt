@@ -1,0 +1,31 @@
+#!/bin/sh
+# Surface SELinux AVC denials where people actually look.
+#
+# On SELinux-enforcing images auditd drains all audit records to
+# /var/log/audit/audit.log, so denials never reach dmesg or logread and a
+# policy gap can look exactly like a plain filesystem permission bug (see
+# docs/06-selinux-audit-diagnostics.md). Activate the audisp syslog
+# plugin so AVC records are mirrored into logread; audit.log (tmpfs,
+# rotated by auditd) remains the complete searchable record.
+if [ -f /etc/audit/plugins.d/syslog.conf ]; then
+	sed -i 's/^active[[:blank:]]*=.*/active = yes/' \
+		/etc/audit/plugins.d/syslog.conf
+	# the feed's conf points at /sbin but the binary installs to /usr/sbin,
+	# so the plugin silently never spawns without this
+	[ -x /usr/sbin/audisp-syslog ] && \
+		sed -i 's|^path[[:blank:]]*=.*|path = /usr/sbin/audisp-syslog|' \
+			/etc/audit/plugins.d/syslog.conf
+fi
+
+# Give the logd ring enough room that a denial burst (a looping netifd
+# proto retry can generate several records per second) cannot wipe the
+# recent history within minutes. Only raise the floor: a deliberately
+# larger value is kept. Note this re-applies after every sysupgrade since
+# uci-defaults re-run from the fresh image.
+log_size="$(uci -q get system.@system[0].log_size)"
+if [ -z "$log_size" ] || [ "$log_size" -lt 1024 ] 2>/dev/null; then
+	uci set system.@system[0].log_size='1024'
+	uci commit system
+fi
+
+exit 0
