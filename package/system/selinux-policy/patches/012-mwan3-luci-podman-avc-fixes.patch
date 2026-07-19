@@ -39,13 +39,34 @@ residual cluster inside the new xtables domain plus one cosmetic one:
    client attribute only granted read -> add locales.data.map_file_files
    mirroring the existing locales.tmp.map_file_files.
 
-All rules derive from kernel-audited AVC records (permissive=1 for
-clusters 1-4, enforcing denials for cluster 5) captured on the running
-router; no speculative grants.
+6. LuCI status helpers also probe and run iptables-nft/ipset through
+   cgi-exec (cgiio.subj getattr on xtables.exec.file, observed under
+   enforcing): transition cgiio into the xtables domain, mirroring its
+   existing nft transition.
 
+All rules derive from kernel-audited AVC records (permissive=1 for
+clusters 1-4, enforcing denials for clusters 5-6) captured on the
+running router; no speculative grants.
+
+diff -Naur a/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil b/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil
+--- a/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil	2025-11-27 06:12:27.000000000 +0000
++++ b/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil	2026-07-19 21:22:05.086214761 +0100
+@@ -38,7 +38,11 @@
+ 
+   (call .tmp.deletename_fs_dirs (subj))
+ 
+-  (call .ubus.server.unix_stream_connect (subj)))
++  (call .ubus.server.unix_stream_connect (subj))
++
++  ;; LuCI status helpers probe/run iptables-nft and ipset via cgi-exec,
++  ;; mirroring the nft transition above
++  (call .xtables.subj_type_transition (subj)))
+ 
+ (in file.unconfined
+ 
 diff -Naur a/src/agent/sysagent/hotplugsysagent.cil b/src/agent/sysagent/hotplugsysagent.cil
---- a/src/agent/sysagent/hotplugsysagent.cil	2026-07-19 20:48:04.265485677 +0100
-+++ b/src/agent/sysagent/hotplugsysagent.cil	2026-07-19 20:46:02.236019453 +0100
+--- a/src/agent/sysagent/hotplugsysagent.cil	2026-07-19 21:21:57.183975954 +0100
++++ b/src/agent/sysagent/hotplugsysagent.cil	2026-07-19 21:17:47.506519241 +0100
 @@ -14,6 +14,9 @@
      (call conf.read_file_files (subj))
      (call conf.read_file_lnk_files (subj))
@@ -91,7 +112,7 @@ diff -Naur a/src/agent/sysagent/hotplugsysagent.cil b/src/agent/sysagent/hotplug
  
 diff -Naur a/src/agent/sysagent/mwan3sysagent.cil b/src/agent/sysagent/mwan3sysagent.cil
 --- a/src/agent/sysagent/mwan3sysagent.cil	1970-01-01 01:00:00.000000000 +0100
-+++ b/src/agent/sysagent/mwan3sysagent.cil	2026-07-19 20:46:02.236087682 +0100
++++ b/src/agent/sysagent/mwan3sysagent.cil	2026-07-19 21:17:47.506603189 +0100
 @@ -0,0 +1,31 @@
 +;; SPDX-FileCopyrightText: © 2026 Mono OpenWrt <mono-openwrt@local>
 +;; SPDX-License-Identifier: Unlicense
@@ -125,8 +146,8 @@ diff -Naur a/src/agent/sysagent/mwan3sysagent.cil b/src/agent/sysagent/mwan3sysa
 +
 +    (call .mwan3.runtmp.runtmp_file_type_transition_file (typeattr)))
 diff -Naur a/src/agent/sysagent/rpcdsysagent.cil b/src/agent/sysagent/rpcdsysagent.cil
---- a/src/agent/sysagent/rpcdsysagent.cil	2026-07-19 20:48:04.265575426 +0100
-+++ b/src/agent/sysagent/rpcdsysagent.cil	2026-07-19 20:46:02.236123740 +0100
+--- a/src/agent/sysagent/rpcdsysagent.cil	2026-07-19 21:21:57.184079329 +0100
++++ b/src/agent/sysagent/rpcdsysagent.cil	2026-07-19 21:17:47.506655428 +0100
 @@ -121,6 +121,10 @@
  
      (call .mtd.read_procfile_files (subj))
@@ -164,8 +185,8 @@ diff -Naur a/src/agent/sysagent/rpcdsysagent.cil b/src/agent/sysagent/rpcdsysage
  
        (filecon "/tmp/run/rpcd" dir file_context)
 diff -Naur a/src/agent/sysagent/wireguardtoolssysagent.cil b/src/agent/sysagent/wireguardtoolssysagent.cil
---- a/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-19 20:48:04.265606004 +0100
-+++ b/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-19 20:46:02.236161891 +0100
+--- a/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-19 21:21:57.184112992 +0100
++++ b/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-19 21:17:47.506708257 +0100
 @@ -38,6 +38,8 @@
  
        (call .netif.data.dontaudit_readinherited_file_files (subj))
@@ -177,7 +198,7 @@ diff -Naur a/src/agent/sysagent/wireguardtoolssysagent.cil b/src/agent/sysagent/
        (call .ucode.readwriteinherited_subj_fifo_files (subj))
 diff -Naur a/src/agent/sysagent/xtablessysagent.cil b/src/agent/sysagent/xtablessysagent.cil
 --- a/src/agent/sysagent/xtablessysagent.cil	1970-01-01 01:00:00.000000000 +0100
-+++ b/src/agent/sysagent/xtablessysagent.cil	2026-07-19 20:48:17.703718655 +0100
++++ b/src/agent/sysagent/xtablessysagent.cil	2026-07-19 21:17:47.506748984 +0100
 @@ -0,0 +1,50 @@
 +;; SPDX-FileCopyrightText: © 2026 Mono OpenWrt <mono-openwrt@local>
 +;; SPDX-License-Identifier: Unlicense
@@ -230,8 +251,8 @@ diff -Naur a/src/agent/sysagent/xtablessysagent.cil b/src/agent/sysagent/xtables
 +	   (call .exec.file_type_transition
 +		 (ARG1 file file "ipset"))))
 diff -Naur a/src/file/datafile/localesdatafile.cil b/src/file/datafile/localesdatafile.cil
---- a/src/file/datafile/localesdatafile.cil	2025-11-27 06:12:27.000000000 +0000
-+++ b/src/file/datafile/localesdatafile.cil	2026-07-19 20:48:31.927851625 +0100
+--- a/src/file/datafile/localesdatafile.cil	2026-07-19 21:21:57.184165681 +0100
++++ b/src/file/datafile/localesdatafile.cil	2026-07-19 21:17:47.506790593 +0100
 @@ -16,10 +16,15 @@
  	     (call .data.file_type_transition
  		 (ARG1 file dir "zoneinfo")))
@@ -249,8 +270,8 @@ diff -Naur a/src/file/datafile/localesdatafile.cil b/src/file/datafile/localesda
      (call locales.data.read_file_files (typeattr))
      (call locales.data.read_file_lnk_files (typeattr)))
 diff -Naur a/src/file/tmpfile/libtmpfile.cil b/src/file/tmpfile/libtmpfile.cil
---- a/src/file/tmpfile/libtmpfile.cil	2026-07-19 20:48:04.265665476 +0100
-+++ b/src/file/tmpfile/libtmpfile.cil	2026-07-19 20:46:02.236219570 +0100
+--- a/src/file/tmpfile/libtmpfile.cil	2026-07-19 21:21:57.184199155 +0100
++++ b/src/file/tmpfile/libtmpfile.cil	2026-07-19 21:17:47.506833834 +0100
 @@ -10,6 +10,11 @@
  	 (call .tmp.fs_type_transition
  	       (ARG1 file dir "lib")))
