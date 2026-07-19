@@ -183,8 +183,10 @@ Validated behavior on April 26, 2026:
   CEETM activation
 
 The proof is intentionally limited. It is not a download-side latency or
-bufferbloat proof, not a CAKE/FQ-CoDel-equivalence claim, and not Stage 4
-user-facing integration.
+bufferbloat proof, and not a CAKE/FQ-CoDel-equivalence claim. The current
+single-port persisted CMM backend is documented separately in
+[07-cmmqos-persistent-shaper.md](07-cmmqos-persistent-shaper.md); multi-port
+and LuCI integration remain future work.
 
 ### Manual Egress QoS Enablement
 
