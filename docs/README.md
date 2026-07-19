@@ -41,6 +41,10 @@ Optional developer tooling:
   denial into /var/log/audit/audit.log — nothing reaches dmesg/logread.
   Where to look, how to fix policy gaps, and the WireGuard fifo case study.
 
+- [07-cmmqos-persistent-shaper.md](07-cmmqos-persistent-shaper.md)
+  Persisted CMM/CEETM upload-shaper operation: supported physical-port scope,
+  fixed channel-1 policy, enable/rollback commands, and validation limits.
+
 - [codeql-scoped-analysis.md](codeql-scoped-analysis.md)
   Scoped CodeQL database and SARIF workflow for ASK package integrations and
   the optional ASK kernel patch surface.
