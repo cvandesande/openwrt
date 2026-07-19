@@ -1,0 +1,17 @@
+#!/bin/sh /etc/rc.common
+
+# One-shot UCI reload bridge. CMM itself owns boot and respawn restoration.
+USE_PROCD=1
+START=55
+
+reload_service() {
+	/usr/sbin/cmm -c 'reload qm-config'
+}
+
+service_triggers() {
+	procd_add_reload_trigger cmmqos
+}
+
+start_service() {
+	return 0
+}
