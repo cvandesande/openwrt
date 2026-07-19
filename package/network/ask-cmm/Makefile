@@ -9,16 +9,16 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ask-cmm
 PKG_VERSION:=17.03.1
-PKG_RELEASE:=25
+PKG_RELEASE:=27
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/cvandesande/ask-cmm.git
 # When PKG_SOURCE_VERSION changes, run this and update PKG_MIRROR_HASH:
 #   scripts/mono-check-vendor-hashes.sh package/network/ask-cmm
-PKG_SOURCE_VERSION:=3e52378b4ec3539cd942dbf6db085722ce1981d3
+PKG_SOURCE_VERSION:=81f1aa40badc7114551d95049907181f45b93ca5
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
 PKG_SOURCE:=$(PKG_SOURCE_SUBDIR).tar.zst
-PKG_MIRROR_HASH:=5cdcee2d3f76bae91ab0788c4b314e3b7c6eb03210eb5618748be2e4a6aa0d6a
+PKG_MIRROR_HASH:=8f0601df0c4a659e3dd6c5935ed0dbc1fafb827fc8d8a8914659ae01d52d5fe9
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_SOURCE_SUBDIR)
 
 PKG_LICENSE:=GPL-2.0-or-later
@@ -34,7 +34,7 @@ define Package/ask-cmm
   SECTION:=net
   CATEGORY:=Network
   TITLE:=NXP ASK Connection Manager daemon
-  DEPENDS:=@TARGET_layerscape +libnetfilter-conntrack +libfci +libcli +libpcap \
+  DEPENDS:=@TARGET_layerscape +libnetfilter-conntrack +libfci +libcli +libpcap +libuci \
 	+kmod-nf-conntrack +kmod-nf-conntrack-netlink +kmod-nf-nat \
 	+kmod-br-netfilter
   URL:=https://github.com/cvandesande/ask-cmm
@@ -74,6 +74,8 @@ TARGET_CFLAGS += \
 	-DENABLE_INGRESS_QOS \
 	-DVLAN_FILTER
 
+CONFIGURE_ARGS += --enable-openwrt-uci-qos
+
 ifeq ($(CONFIG_PACKAGE_ask-cmm_4rd),y)
 TARGET_CFLAGS += -DCMM_4RD_SUPPORT
 endif
@@ -87,9 +89,11 @@ define Package/ask-cmm/install
 
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/fastforward $(1)/etc/config/
+	$(INSTALL_CONF) ./files/cmmqos.config $(1)/etc/config/cmmqos
 
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/cmm.init $(1)/etc/init.d/cmm
+	$(INSTALL_BIN) ./files/cmmqos.init $(1)/etc/init.d/cmmqos
 endef
 
 $(eval $(call BuildPackage,ask-cmm))
