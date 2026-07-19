@@ -140,26 +140,29 @@ Current conclusion:
 
 ## Hardware QoS Status
 
-The first upload-side CEETM hardware egress-shaping proof is validated, but
-production-ready hardware QoS controls remain future work.
+The first upload-side CEETM hardware egress-shaping proof is validated. The
+single-port persisted CMM backend is also validated on the current `eth4` WAN
+path; multi-port controls and a LuCI frontend remain future work.
 
-Validated state on April 26, 2026:
+Validated evidence:
 
 - the CEETM/QM query and set surfaces are compiled in
 - the Mono kernel has the CEETM-capable TX owner path enabled
-- `eth0` can be assigned to CEETM channel 1 and switched to egress QoS mode
-- `query qm interface eth0` reports active CEETM egress state instead of
-  `Interface eth0 qos disabled`
+- a physical WAN port can be assigned to CEETM channel 1 and switched to
+  egress QoS mode
+- `ask-cmm-17.03.1-r27` persists the current `eth4` shaper through UCI and
+  CMM startup/reload
 - a CEETM port shaper can be set and queried back honestly
 - a host-side upload through `pppoe-wan` was capped below the higher-rate
   comparison run by the hardware path
 
 Current conclusion:
 
-- do not treat hardware QoS as a small config toggle
+- use the supported single-port `cmmqos` UCI control path rather than manual
+  commands for the current WAN shaper
 - do not treat it as a generic OpenWrt SQM/CAKE equivalent
 - treat the current proof as upload-side WAN egress shaping only
-- keep Stage 4 user-facing controls deferred
+- keep multi-port and LuCI user-facing controls deferred
 - keep Stage 6 soak/repeatability as active future work
 
 This work should remain an NXP hardware-control feature and should not change
@@ -168,4 +171,5 @@ policy.
 
 For the detailed architecture and proof model, see
 [02-fast-path-architecture.md](02-fast-path-architecture.md) and
-[03-fman-backend-design.md](03-fman-backend-design.md).
+[03-fman-backend-design.md](03-fman-backend-design.md). For operation of the
+persisted shaper, see [07-cmmqos-persistent-shaper.md](07-cmmqos-persistent-shaper.md).
