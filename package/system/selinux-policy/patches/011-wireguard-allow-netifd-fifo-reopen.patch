@@ -1,0 +1,30 @@
+From: Mono OpenWrt <mono-openwrt@local>
+Subject: selinux-policy: let wg re-open netifd's config pipe
+
+netifd's wireguard proto handler builds the tunnel config in memory and
+pipes it into `wg syncconf <iface> /dev/stdin`. wg does not read the
+inherited fd directly: fopen("/dev/stdin") re-opens the pipe through
+/proc/self/fd/0, and with the open_perms policy capability active that
+requires `open` on netifd's fifo, which the inherited read/write grant
+from the agent template does not include. The sync therefore fails
+unconditionally with EACCES while enforcing, and netifd loops the
+interface in pending/retry forever. The failure is silent because kernel
+auditing is off by default, so no AVC ever reaches the log.
+
+Grant the missing `open`, mirroring the explicit ucode fifo open added
+for the same reason in the bring-up patch.
+
+--- a/src/agent/sysagent/wireguardtoolssysagent.cil
++++ b/src/agent/sysagent/wireguardtoolssysagent.cil
+@@ -42,6 +42,11 @@
+ 
+       (call .ucode.readwriteinherited_subj_fifo_files (subj))
+       (allow subj .ucode.subj (fifo_file (open)))
++
++      ;; netifd's wireguard proto script pipes the config into
++      ;; `wg syncconf <iface> /dev/stdin`; reopening the inherited pipe
++      ;; via /proc/self/fd/0 requires open on top of inherited read/write
++      (allow subj .netif.server.subj (fifo_file (open)))
+ 
+       (call wireguard.tmp.list_file_dirs (subj))
+       (call wireguard.tmp.readwrite_file_files (subj))))
