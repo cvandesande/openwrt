@@ -1,3 +1,6 @@
+# Local overrides must precede the upstream packages feed so feeds install
+# selects them for duplicate source-package names.
+src-link mono ../package/mono-feed
 src-git packages https://git.openwrt.org/feed/packages.git
 src-git luci https://git.openwrt.org/project/luci.git
 src-git routing https://git.openwrt.org/feed/routing.git
