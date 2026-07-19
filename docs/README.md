@@ -36,6 +36,11 @@ Optional developer tooling:
   the modules on this driver stack, the cage I2C bus map, and copper-module
   PHY access (Rollball) for real link-state visibility.
 
+- [06-selinux-audit-diagnostics.md](06-selinux-audit-diagnostics.md)
+  SELinux on these images runs enforcing with auditd draining every AVC
+  denial into /var/log/audit/audit.log — nothing reaches dmesg/logread.
+  Where to look, how to fix policy gaps, and the WireGuard fifo case study.
+
 - [codeql-scoped-analysis.md](codeql-scoped-analysis.md)
   Scoped CodeQL database and SARIF workflow for ASK package integrations and
   the optional ASK kernel patch surface.
