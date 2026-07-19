@@ -1,10 +1,10 @@
 name: Mono OpenWrt cached build
 description: >-
-  Shared cache-key computation, ccache/host/hostpkg cache restore-and-save,
-  and toolchain/firmware build steps used by nightly and all mono-ask
-  release workflows. Callers are responsible for checking out the source
-  tree, restoring the dl cache, updating feeds, and writing .config before
-  invoking this action.
+  Shared cache-key computation, ccache/host/hostpkg/toolchain-state cache
+  restore-and-save, and toolchain/firmware build steps used by nightly and
+  all mono-ask release workflows. Callers are responsible for checking out
+  the source tree, restoring the dl cache, updating feeds, and writing
+  .config before invoking this action.
 
 inputs:
   source-dir:
@@ -114,6 +114,18 @@ runs:
         # ~330 non-kernel packages too.
         toolchain_tree_hash="$(git_tree_hash Makefile Config.in rules.mk include toolchain)"
         toolchain_config_hash="$(toolchain_config_hash)"
+        # The toolchain state also depends on the host tools used to build
+        # it.  Keep this separate from ccache's content-addressed namespace.
+        host_tool_hash="$(
+          {
+            . /etc/os-release
+            printf 'os=%s\nversion=%s\n' "$ID" "$VERSION_ID"
+            gcc --version | head -n1
+            g++ --version | head -n1
+            ld --version | head -n1
+            make --version | head -n1
+          } | sha256sum | cut -d ' ' -f1
+        )"
         ccache_family="${CACHE_PREFIX}-ccache-${CACHE_EPOCH}-absdir-v1-${toolchain_tree_hash}-${toolchain_config_hash}"
         ccache_week="$(date -u +%G-W%V)"
 
@@ -123,7 +135,10 @@ runs:
           printf 'ccache_restore_family=%s-week-\n' "$ccache_family"
           printf 'host_key=%s-host-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$host_tree_hash" "$config_hash"
           printf 'hostpkg_key=%s-hostpkg-%s-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$hostpkg_tree_hash" "$feed_hash" "$config_hash"
-          printf 'toolchain_key=%s-toolchain-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$toolchain_tree_hash" "$toolchain_config_hash"
+          # v2 expands the old installed-output-only cache into a complete
+          # toolchain build state. Do not add restore-keys here: this state
+          # cache is safe only on an exact compatibility match.
+          printf 'toolchain_key=%s-toolchain-state-v2-%s-%s-%s-%s-%s\n' "$CACHE_PREFIX" "$CACHE_EPOCH" "$host_tree_hash" "$host_tool_hash" "$toolchain_tree_hash" "$toolchain_config_hash"
           printf 'toolchain_tree_hash=%s\n' "$toolchain_tree_hash"
           printf 'toolchain_config_hash=%s\n' "$toolchain_config_hash"
         } >> "$GITHUB_OUTPUT"
@@ -154,13 +169,46 @@ runs:
         path: ${{ inputs.source-dir }}/staging_dir/hostpkg
         key: ${{ steps.cache-keys.outputs.hostpkg_key }}
 
-    - name: Restore staging_dir/toolchain-* cache
+    - name: Restore coherent toolchain-state cache
       id: restore-toolchain
       if: ${{ inputs.cold-build != 'true' }}
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ${{ inputs.source-dir }}/staging_dir/toolchain-*
+        # OpenWrt needs both its build workspace/stamps and installed
+        # toolchain output. Restoring staging_dir alone cannot make a fresh
+        # runner's toolchain build incremental.
+        path: |
+          ${{ inputs.source-dir }}/build_dir/toolchain-*
+          ${{ inputs.source-dir }}/staging_dir/toolchain-*
+          ${{ inputs.source-dir }}/tmp/.build
         key: ${{ steps.cache-keys.outputs.toolchain_key }}
+
+    - name: Normalize exact-hit toolchain stamps
+      if: ${{ inputs.cold-build != 'true' && steps.restore-toolchain.outputs.cache-hit == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.source-dir }}
+      run: |
+        set -euo pipefail
+
+        # Every run starts from a fresh Git clone and a freshly generated
+        # .config, so their mtimes are newer than stamps restored from an
+        # otherwise exact cache hit. The exact, input-complete cache key above
+        # establishes compatibility; refresh only OpenWrt's dependency stamps
+        # so make can reconcile real missing outputs instead of rebuilding
+        # solely because checkout time changed.
+        touch tmp/.build
+
+        for build_dir in build_dir/toolchain-*; do
+          [ -d "$build_dir" ] || continue
+          find "$build_dir" -type f \
+            \( -name '.prepared*' -o -name '.configured' -o -name '.built' \) \
+            -exec touch {} +
+        done
+
+        for toolchain_dir in staging_dir/toolchain-*; do
+          [ -d "$toolchain_dir/stamp" ] || continue
+          find "$toolchain_dir/stamp" -type f -exec touch {} +
+        done
 
     - name: Report cache restore state
       id: cache-state
@@ -215,7 +263,7 @@ runs:
           echo "| ccache | \`${ccache_state}\` |"
           echo "| staging_dir/host | \`${host_state}\` |"
           echo "| staging_dir/hostpkg | \`${hostpkg_state}\` |"
-          echo "| staging_dir/toolchain-* | \`${toolchain_state}\` |"
+          echo "| coherent toolchain state | \`${toolchain_state}\` |"
           echo
           echo "Toolchain tree hash: \`${{ steps.cache-keys.outputs.toolchain_tree_hash }}\`"
           echo
@@ -224,7 +272,7 @@ runs:
           echo "Restored directory sizes:"
           echo
           echo '```text'
-          du -sh dl .ccache staging_dir/host staging_dir/hostpkg staging_dir/toolchain-* 2>/dev/null || true
+          du -sh dl .ccache staging_dir/host staging_dir/hostpkg build_dir/toolchain-* staging_dir/toolchain-* 2>/dev/null || true
           echo '```'
         } >> "$GITHUB_STEP_SUMMARY"
 
@@ -306,9 +354,12 @@ runs:
         path: ${{ inputs.source-dir }}/staging_dir/hostpkg
         key: ${{ steps.cache-keys.outputs.hostpkg_key }}
 
-    - name: Save staging_dir/toolchain-* cache
+    - name: Save coherent toolchain-state cache
       if: ${{ success() && inputs.cold-build != 'true' && steps.restore-toolchain.outputs.cache-hit != 'true' }}
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ${{ inputs.source-dir }}/staging_dir/toolchain-*
+        path: |
+          ${{ inputs.source-dir }}/build_dir/toolchain-*
+          ${{ inputs.source-dir }}/staging_dir/toolchain-*
+          ${{ inputs.source-dir }}/tmp/.build
         key: ${{ steps.cache-keys.outputs.toolchain_key }}
