@@ -59,13 +59,10 @@ firmware/config and know your recovery path before installing.
 - Native OpenWrt `sysupgrade` support.
 - NXP hardware offload for 1G routed WAN traffic, including FMAN/DPAA routing
   paths with VLAN, PPPoE, firewall, and NAT, plus IPsec crypto.
+- 10G/SFP+ hardware offload for routed traffic.
+- IPv6 hardware offload.
 - Runtime tools to show whether traffic is using hardware offload.
 - Upload-side hardware QoS on the WAN path.
-
-## Needs Testing
-
-- 10G hardware offload.
-- IPv6 hardware offload.
 
 ## Future Work
 
