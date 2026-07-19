@@ -1,0 +1,217 @@
+From: Mono OpenWrt <mono-openwrt@local>
+Subject: selinux-policy: clear the post-flash AVC denials (mwan3, LuCI, podman)
+
+The first (permissive) boot of the 2026-07-19 image logged four clusters
+of denials that would become real breakage on the next enforcing boot:
+
+1. mwan3's interface hotplug script (hotplug.call.subj) runs
+   iptables-nft to apply policy-routing marks: xtables-nft-multi was
+   unlabeled so it ran in the caller's domain, tripping netfilter
+   netlink/rawip socket and net_admin/net_raw capability denials. Give
+   iptables-nft and ipset their own confined domain (block xtables,
+   modeled on the existing nft block) and transition hotplug-call and
+   rpcd into it. The same script also flocks /tmp/lock/procd_mwan3.lock,
+   stats /etc/mwan3.user, and reads /tmp/run/mwan3/mmx_mask.
+
+2. LuCI status pages via rpcd (rpc.server.subj): the WireGuard page
+   spawns `wg show` (transition into the existing wireguard.wg domain,
+   mirroring the ucode transition from the bring-up patch), the mwan3
+   page reads /tmp/run/mwan3track state and spawns ipset, and the
+   system header reads /proc/uptime.
+
+3. mwan3's runtime state gets its own scoped runtmp block so the
+   confined readers above don't need blanket access to generic
+   /tmp/run files.
+
+4. podman keeps its overlay storage under /var/lib -> /tmp/lib; files
+   created on that overlay keep their libtmp label and need associate
+   on the xattr-labeled overlay filesystem.
+
+All rules derive from kernel-audited AVC records (permissive=1) captured
+on the running router; no speculative grants.
+
+--- a/src/agent/sysagent/hotplugsysagent.cil	2025-11-27 06:12:27.000000000 +0000
++++ b/src/agent/sysagent/hotplugsysagent.cil	2026-07-19 14:50:31.098853040 +0100
+@@ -14,6 +14,9 @@
+     (call conf.read_file_files (subj))
+     (call conf.read_file_lnk_files (subj))
+ 
++    ;; mwan3's iface hotplug checks for an executable /etc/mwan3.user
++    (allow subj .conf.file (file (getattr)))
++
+     (call .block.list_sysfile_dirs (subj))
+     (call .block.read_sysfile_lnk_files (subj))
+ 
+@@ -59,12 +62,20 @@
+     (call .libubox.data.list_file_dirs (subj))
+     (call .libubox.data.read_file_files (subj))
+ 
++    ;; flock: procd_mwan3.lock
++    (call .locktmp.search_file_dirs (subj))
++    (call .locktmp.readwrite_file_files (subj))
++
+     (call .log.server.unix_dgram_send (subj))
+ 
+     (call .mtd.read_procfile_files (subj))
+ 
+     (call .mtd.read_stordev_chr_files (subj))
+ 
++    ;; mwan3's iface hotplug reads /tmp/run/mwan3/mmx_mask
++    (call .mwan3.runtmp.list_file_dirs (subj))
++    (call .mwan3.runtmp.read_file_files (subj))
++
+     (call .net.search_sysctlfile_dirs (subj))
+ 
+     (call .netif.data.list_file_dirs (subj))
+@@ -112,7 +123,10 @@
+ 
+     (call .ucode.data.dontaudit_readinherited_file_files (subj))
+ 
+-    (call .wifi.subj_type_transition (subj)))
++    (call .wifi.subj_type_transition (subj))
++
++    ;; mwan3's iface hotplug applies policy routing marks with iptables-nft
++    (call .xtables.subj_type_transition (subj)))
+ 
+   (block conf
+ 
+--- a/src/agent/sysagent/mwan3sysagent.cil	1970-01-01 01:00:00.000000000 +0100
++++ b/src/agent/sysagent/mwan3sysagent.cil	2026-07-19 14:49:43.944882172 +0100
+@@ -0,0 +1,31 @@
++;; SPDX-FileCopyrightText: © 2026 Mono OpenWrt <mono-openwrt@local>
++;; SPDX-License-Identifier: Unlicense
++
++;; mwan3 keeps runtime state under /tmp/run/mwan3 (policy marks/masks) and
++;; /tmp/run/mwan3track (per-interface tracker state). The daemons run
++;; unconfined; scoping the state lets confined readers (hotplug-call,
++;; rpcd) be granted read access without opening up generic runtmp.
++
++(block mwan3
++
++  (block runtmp
++
++    (filecon "/tmp/run/mwan3" dir file_context)
++    (filecon "/tmp/run/mwan3/.*" any file_context)
++
++    (filecon "/tmp/run/mwan3track" dir file_context)
++    (filecon "/tmp/run/mwan3track/.*" any file_context)
++
++    (macro runtmp_file_type_transition_file ((type ARG1))
++	   (call .runtmp.file_type_transition
++		 (ARG1 file dir "mwan3"))
++	   (call .runtmp.file_type_transition
++		 (ARG1 file dir "mwan3track")))
++
++    (blockinherit .file.macro_template_dirs)
++    (blockinherit .file.macro_template_files)
++    (blockinherit .file.tmp.run.base_template)))
++
++(in file.unconfined
++
++    (call .mwan3.runtmp.runtmp_file_type_transition_file (typeattr)))
+--- a/src/agent/sysagent/rpcdsysagent.cil	2025-11-27 06:12:27.000000000 +0000
++++ b/src/agent/sysagent/rpcdsysagent.cil	2026-07-19 14:50:31.098976954 +0100
+@@ -121,6 +121,10 @@
+ 
+     (call .mtd.read_procfile_files (subj))
+ 
++    ;; LuCI mwan3 status reads /tmp/run/mwan3track/*/STARTED
++    (call .mwan3.runtmp.list_file_dirs (subj))
++    (call .mwan3.runtmp.read_file_files (subj))
++
+     ;; /etc/passwd for router password
+     (call .nameservice.conf.manage_file_files (subj))
+ 
+@@ -207,8 +211,14 @@
+     (call .upgrade.data.list_file_dirs (subj))
+     (call .upgrade.data.read_file_files (subj))
+ 
++    ;; LuCI status pages read /proc/uptime
++    (call .uptime.read_procfile_files (subj))
++
+     (call .wifi.subj_type_transition (subj))
+ 
++    ;; LuCI wireguard status runs `wg show` from rpcd shell plugins
++    (call .wireguard.wg.subj_type_transition (subj))
++
+     (call .wpa.server.subj_type_transition (subj))
+ 
+     (call .wpa.server.unix_dgram_send_supplicant (subj))
+@@ -218,6 +228,9 @@
+ 
+     (call .xattr.unmount_fs (subj))
+ 
++    ;; LuCI mwan3/banip status helpers run ipset
++    (call .xtables.subj_type_transition (subj))
++
+     (block runtmp
+ 
+       (filecon "/tmp/run/rpcd" dir file_context)
+--- a/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-19 14:13:13.924302645 +0100
++++ b/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-19 14:50:31.099001720 +0100
+@@ -38,6 +38,8 @@
+ 
+       (call .netif.data.dontaudit_readinherited_file_files (subj))
+ 
++      (call .rpc.data.dontaudit_readinherited_file_files (subj))
++
+       (call .ucode.data.dontaudit_readinherited_file_files (subj))
+ 
+       (call .ucode.readwriteinherited_subj_fifo_files (subj))
+--- a/src/agent/sysagent/xtablessysagent.cil	1970-01-01 01:00:00.000000000 +0100
++++ b/src/agent/sysagent/xtablessysagent.cil	2026-07-19 15:04:17.267516206 +0100
+@@ -0,0 +1,40 @@
++;; SPDX-FileCopyrightText: © 2026 Mono OpenWrt <mono-openwrt@local>
++;; SPDX-License-Identifier: Unlicense
++
++;; iptables-nft (xtables-nft-multi) and ipset: netfilter management tools
++;; spawned by confined callers (mwan3's interface hotplug script, LuCI
++;; status helpers via rpcd). nft has its own domain already; these two
++;; previously ran unconfined in their callers' domains.
++
++(block xtables
++
++  (blockinherit .sys.agent.template)
++
++  (allow subj self (capability (net_admin net_raw)))
++  (allow subj self create_netlink_netfilter_socket)
++  (allow subj self create_rawip_socket)
++
++  ;; iptables-nft probes legacy tables through /proc/self/net
++  (call .net.read_procfile_files (subj))
++  (call .net.read_procfile_lnk_files (subj))
++
++  (call .rpc.data.dontaudit_readinherited_file_files (subj))
++
++  (call .sys.modulerequest_system (subj))
++
++  (call .ucode.data.dontaudit_readinherited_file_files (subj)))
++
++(in file.unconfined
++
++    (call .xtables.exec.exec_file_type_transition_file (typeattr)))
++
++(in after xtables.exec
++
++    (filecon "/usr/bin/xtables-nft-multi" file file_context)
++    (filecon "/usr/bin/ipset" file file_context)
++
++    (macro exec_file_type_transition_file ((type ARG1))
++	   (call .exec.file_type_transition
++		 (ARG1 file file "xtables-nft-multi"))
++	   (call .exec.file_type_transition
++		 (ARG1 file file "ipset"))))
+--- a/src/file/tmpfile/libtmpfile.cil	2025-11-27 06:12:27.000000000 +0000
++++ b/src/file/tmpfile/libtmpfile.cil	2026-07-19 14:50:31.099026607 +0100
+@@ -10,6 +10,11 @@
+ 	 (call .tmp.fs_type_transition
+ 	       (ARG1 file dir "lib")))
+ 
++  ;; podman keeps its overlay storage under /var/lib -> /tmp/lib; files
++  ;; created on that overlay keep their libtmp label and must be allowed
++  ;; to associate with the xattr-labeled overlay filesystem
++  (call .xattr.client.associate_fs.type (file))
++
+   (blockinherit .file.tmp.lib.template))
+ 
+ (in file.tmp
