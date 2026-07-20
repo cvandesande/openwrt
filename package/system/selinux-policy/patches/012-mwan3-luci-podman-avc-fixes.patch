@@ -1,7 +1,19 @@
 diff -Naur a/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil b/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil
---- a/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil	2026-07-20 21:18:34.079530372 +0100
-+++ b/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil	2026-07-20 21:17:30.563035226 +0100
-@@ -24,6 +24,12 @@
+--- a/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil	2026-07-20 22:41:01.510546438 +0100
++++ b/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil	2026-07-20 22:40:45.111543850 +0100
+@@ -18,12 +18,24 @@
+   ;; mtdblock backup
+   (call .mtd.read_stordev_blk_files (subj))
+ 
++  ;; LuCI's mwan3 status pages exec /usr/sbin/mwan3 through cgi-exec
++  (call .mwan3.subj_type_transition (subj))
++
++  ;; LuCI's strongswan status page execs /usr/sbin/swanmon through cgi-exec
++  (call .swanmon.subj_type_transition (subj))
++
+   (call .nft.subj_type_transition (subj))
+ 
+   (call .shell.client.type (subj))
  
    (call .stordev.read.type (subj))
  
@@ -14,7 +26,7 @@ diff -Naur a/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil b/s
    ;; cgi-exec executes busybox dmesg
    (call .sys.syslogread_system (subj))
  
-@@ -38,7 +44,11 @@
+@@ -38,7 +50,11 @@
  
    (call .tmp.deletename_fs_dirs (subj))
  
@@ -28,8 +40,8 @@ diff -Naur a/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil b/s
  (in file.unconfined
  
 diff -Naur a/src/agent/sysagent/hotplugsysagent.cil b/src/agent/sysagent/hotplugsysagent.cil
---- a/src/agent/sysagent/hotplugsysagent.cil	2026-07-20 21:18:34.079662321 +0100
-+++ b/src/agent/sysagent/hotplugsysagent.cil	2026-07-19 21:24:51.510290510 +0100
+--- a/src/agent/sysagent/hotplugsysagent.cil	2026-07-20 22:41:01.510600780 +0100
++++ b/src/agent/sysagent/hotplugsysagent.cil	2026-07-20 22:31:56.310007558 +0100
 @@ -14,6 +14,9 @@
      (call conf.read_file_files (subj))
      (call conf.read_file_lnk_files (subj))
@@ -40,13 +52,17 @@ diff -Naur a/src/agent/sysagent/hotplugsysagent.cil b/src/agent/sysagent/hotplug
      (call .block.list_sysfile_dirs (subj))
      (call .block.read_sysfile_lnk_files (subj))
  
-@@ -59,12 +62,20 @@
+@@ -59,12 +62,24 @@
      (call .libubox.data.list_file_dirs (subj))
      (call .libubox.data.read_file_files (subj))
  
-+    ;; flock: procd_mwan3.lock
-+    (call .locktmp.search_file_dirs (subj))
-+    (call .locktmp.readwrite_file_files (subj))
++    ;; flock: procd_mwan3.lock. /tmp/lock is tmpfs, so the lock file does not
++    ;; survive a reboot and hotplug-call must be able to create it, not just
++    ;; open an existing one: openat(O_CREAT) needs write+add_name on the dir
++    ;; and create on the file. Mirrors envtools and odhcpd, the other agents
++    ;; that take locks here.
++    (call .locktmp.manage_file_files (subj))
++    (call .locktmp.readwrite_file_dirs (subj))
 +
      (call .log.server.unix_dgram_send (subj))
  
@@ -61,7 +77,7 @@ diff -Naur a/src/agent/sysagent/hotplugsysagent.cil b/src/agent/sysagent/hotplug
      (call .net.search_sysctlfile_dirs (subj))
  
      (call .netif.data.list_file_dirs (subj))
-@@ -112,7 +123,10 @@
+@@ -112,7 +127,10 @@
  
      (call .ucode.data.dontaudit_readinherited_file_files (subj))
  
@@ -75,17 +91,51 @@ diff -Naur a/src/agent/sysagent/hotplugsysagent.cil b/src/agent/sysagent/hotplug
  
 diff -Naur a/src/agent/sysagent/mwan3sysagent.cil b/src/agent/sysagent/mwan3sysagent.cil
 --- a/src/agent/sysagent/mwan3sysagent.cil	1970-01-01 01:00:00.000000000 +0100
-+++ b/src/agent/sysagent/mwan3sysagent.cil	2026-07-19 21:24:51.510341015 +0100
-@@ -0,0 +1,31 @@
++++ b/src/agent/sysagent/mwan3sysagent.cil	2026-07-20 22:36:26.276706749 +0100
+@@ -0,0 +1,76 @@
 +;; SPDX-FileCopyrightText: © 2026 Mono OpenWrt <mono-openwrt@local>
 +;; SPDX-License-Identifier: Unlicense
 +
 +;; mwan3 keeps runtime state under /tmp/run/mwan3 (policy marks/masks) and
-+;; /tmp/run/mwan3track (per-interface tracker state). The daemons run
-+;; unconfined; scoping the state lets confined readers (hotplug-call,
-+;; rpcd) be granted read access without opening up generic runtmp.
++;; /tmp/run/mwan3track (per-interface tracker state). Scoping the state lets
++;; confined readers (hotplug-call, rpcd) be granted read access without
++;; opening up generic runtmp.
++;;
++;; /usr/sbin/mwan3 is a /bin/sh script, so this domain follows the
++;; boarddetect/hotplug-call pattern for script agents: shell.client for the
++;; interpreter, functions/libubox for the sourced shell libraries, and a
++;; subj_type_transition for each helper it spawns so they run confined in
++;; their own domains rather than inheriting this one.
++;;
++;; Needed because LuCI's mwan3 status pages exec it through cgi-exec, which
++;; IS confined: without a label on the executable the binary stays generic
++;; exec.file, cgiio cannot even getattr it, and every mwan3 page fails.
 +
 +(block mwan3
++
++  (blockinherit .sys.agent.template)
++
++  (call .functions.client.type (subj))
++
++  (call .libubox.data.list_file_dirs (subj))
++  (call .libubox.data.read_file_files (subj))
++
++  (call .shell.client.type (subj))
++
++  ;; helpers: ubus/uci for config, jsonfilter for parsing, ip for the policy
++  ;; routing tables, iptables-nft/ipset for the marking rules
++  (call .iproute2.ip.subj_type_transition (subj))
++  (call .jsonfilter.subj_type_transition (subj))
++  (call .ubus.subj_type_transition (subj))
++  (call .uci.subj_type_transition (subj))
++  (call .xtables.subj_type_transition (subj))
++
++  ;; its own runtime state (mmx_mask and friends)
++  (call runtmp.list_file_dirs (subj))
++  (call runtmp.manage_file_files (subj))
++  (call runtmp.readwrite_file_dirs (subj))
++
++  (call .tmp.deletename_fs_dirs (subj))
 +
 +  (block runtmp
 +
@@ -107,10 +157,21 @@ diff -Naur a/src/agent/sysagent/mwan3sysagent.cil b/src/agent/sysagent/mwan3sysa
 +
 +(in file.unconfined
 +
++    (call .mwan3.exec.exec_file_type_transition_file (typeattr))
 +    (call .mwan3.runtmp.runtmp_file_type_transition_file (typeattr)))
++
++(in after mwan3.exec
++
++    ;; file_contexts.subs_dist maps /usr/sbin -> /usr/bin, so the on-disk
++    ;; /usr/sbin/mwan3 must be written as /usr/bin/mwan3 here
++    (filecon "/usr/bin/mwan3" file file_context)
++
++    (macro exec_file_type_transition_file ((type ARG1))
++	   (call .exec.file_type_transition
++		 (ARG1 file file "mwan3"))))
 diff -Naur a/src/agent/sysagent/rpcdsysagent.cil b/src/agent/sysagent/rpcdsysagent.cil
---- a/src/agent/sysagent/rpcdsysagent.cil	2026-07-20 21:18:34.079760806 +0100
-+++ b/src/agent/sysagent/rpcdsysagent.cil	2026-07-19 21:24:51.510390098 +0100
+--- a/src/agent/sysagent/rpcdsysagent.cil	2026-07-20 22:41:01.510664801 +0100
++++ b/src/agent/sysagent/rpcdsysagent.cil	2026-07-20 22:20:08.886447478 +0100
 @@ -121,6 +121,10 @@
  
      (call .mtd.read_procfile_files (subj))
@@ -147,9 +208,76 @@ diff -Naur a/src/agent/sysagent/rpcdsysagent.cil b/src/agent/sysagent/rpcdsysage
      (block runtmp
  
        (filecon "/tmp/run/rpcd" dir file_context)
+diff -Naur a/src/agent/sysagent/swanmonsysagent.cil b/src/agent/sysagent/swanmonsysagent.cil
+--- a/src/agent/sysagent/swanmonsysagent.cil	1970-01-01 01:00:00.000000000 +0100
++++ b/src/agent/sysagent/swanmonsysagent.cil	2026-07-20 22:40:39.935565601 +0100
+@@ -0,0 +1,63 @@
++;; SPDX-FileCopyrightText: © 2026 Mono OpenWrt <mono-openwrt@local>
++;; SPDX-License-Identifier: Unlicense
++
++;; swanmon serialises strongSwan's VICI output to JSON for LuCI's
++;; luci-app-strongswan-swanctl status page, which execs it through cgi-exec.
++;; cgi-exec IS confined, so without a label on the executable the binary stays
++;; generic exec.file, cgiio cannot getattr or execute it, and the IPsec status
++;; page fails under enforcing.
++;;
++;; charon itself is left unconfined; only its VICI socket is typed, following
++;; the pattern patch 012 already uses for mwan3's runtime state. That is enough
++;; to let swanmon connect to the socket without granting it access to every
++;; other runtime socket on the system, and mirrors refpolicy's split of
++;; ipsec_var_run_t from the ipsec_mgmt_t management domain.
++
++(block strongswan
++
++  (block runtmp
++
++    ;; charon recreates this on every boot (/tmp is tmpfs), so it picks up the
++    ;; type from the transition below rather than needing a relabel
++    (filecon "/tmp/run/charon\.vici" socket file_context)
++
++    (macro unix_stream_connect ((type ARG1))
++	   (call write_file_sock_files (ARG1))
++	   (call search_file_dirs (ARG1)))
++
++    (macro runtmp_file_type_transition_file ((type ARG1)(name ARG2))
++	   (call .runtmp.file_type_transition
++		 (ARG1 file sock_file ARG2)))
++
++    (blockinherit .file.macro_template_dirs)
++    (blockinherit .file.macro_template_sock_files)
++    (blockinherit .file.tmp.run.base_template)))
++
++(block swanmon
++
++  (blockinherit .sys.agent.template)
++
++  (allow subj self create_unix_stream_stream_socket)
++
++  ;; the VICI client connection
++  (allow subj .strongswan.runtmp.file (unix_stream_socket (connectto)))
++
++  (call .strongswan.runtmp.unix_stream_connect (subj))
++
++  (call .locales.client.type (subj)))
++
++(in file.unconfined
++
++    (call .strongswan.runtmp.runtmp_file_type_transition_file
++	  (typeattr "charon.vici"))
++
++    (call .swanmon.exec.exec_file_type_transition_file (typeattr)))
++
++(in after swanmon.exec
++
++    ;; file_contexts.subs_dist maps /usr/sbin -> /usr/bin
++    (filecon "/usr/bin/swanmon" file file_context)
++
++    (macro exec_file_type_transition_file ((type ARG1))
++	   (call .exec.file_type_transition
++		 (ARG1 file file "swanmon"))))
 diff -Naur a/src/agent/sysagent/wireguardtoolssysagent.cil b/src/agent/sysagent/wireguardtoolssysagent.cil
---- a/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-20 21:18:34.079791384 +0100
-+++ b/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-19 21:24:51.510443969 +0100
+--- a/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-20 22:41:01.510691852 +0100
++++ b/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-20 22:20:08.886493094 +0100
 @@ -38,6 +38,8 @@
  
        (call .netif.data.dontaudit_readinherited_file_files (subj))
@@ -161,7 +289,7 @@ diff -Naur a/src/agent/sysagent/wireguardtoolssysagent.cil b/src/agent/sysagent/
        (call .ucode.readwriteinherited_subj_fifo_files (subj))
 diff -Naur a/src/agent/sysagent/xtablessysagent.cil b/src/agent/sysagent/xtablessysagent.cil
 --- a/src/agent/sysagent/xtablessysagent.cil	1970-01-01 01:00:00.000000000 +0100
-+++ b/src/agent/sysagent/xtablessysagent.cil	2026-07-20 21:17:37.783000242 +0100
++++ b/src/agent/sysagent/xtablessysagent.cil	2026-07-20 22:20:08.886531566 +0100
 @@ -0,0 +1,54 @@
 +;; SPDX-FileCopyrightText: © 2026 Mono OpenWrt <mono-openwrt@local>
 +;; SPDX-License-Identifier: Unlicense
@@ -218,8 +346,8 @@ diff -Naur a/src/agent/sysagent/xtablessysagent.cil b/src/agent/sysagent/xtables
 +	   (call .exec.file_type_transition
 +		 (ARG1 file file "ipset"))))
 diff -Naur a/src/file/datafile/localesdatafile.cil b/src/file/datafile/localesdatafile.cil
---- a/src/file/datafile/localesdatafile.cil	2026-07-20 21:18:34.079842440 +0100
-+++ b/src/file/datafile/localesdatafile.cil	2026-07-19 21:24:51.510536293 +0100
+--- a/src/file/datafile/localesdatafile.cil	2026-07-20 22:41:01.510738239 +0100
++++ b/src/file/datafile/localesdatafile.cil	2026-07-20 22:20:08.886574197 +0100
 @@ -16,10 +16,15 @@
  	     (call .data.file_type_transition
  		 (ARG1 file dir "zoneinfo")))
@@ -237,8 +365,8 @@ diff -Naur a/src/file/datafile/localesdatafile.cil b/src/file/datafile/localesda
      (call locales.data.read_file_files (typeattr))
      (call locales.data.read_file_lnk_files (typeattr)))
 diff -Naur a/src/file/tmpfile/libtmpfile.cil b/src/file/tmpfile/libtmpfile.cil
---- a/src/file/tmpfile/libtmpfile.cil	2026-07-20 21:18:34.079870503 +0100
-+++ b/src/file/tmpfile/libtmpfile.cil	2026-07-19 21:24:51.510583973 +0100
+--- a/src/file/tmpfile/libtmpfile.cil	2026-07-20 22:41:01.510766012 +0100
++++ b/src/file/tmpfile/libtmpfile.cil	2026-07-20 22:20:08.886617569 +0100
 @@ -10,6 +10,11 @@
  	 (call .tmp.fs_type_transition
  	       (ARG1 file dir "lib")))
