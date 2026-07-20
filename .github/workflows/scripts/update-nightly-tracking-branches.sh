@@ -251,6 +251,31 @@ publish() {
 		exit 1
 	fi
 
+	# Prepare rebuilds these branches from the remote tips as they stood when
+	# prepare ran, then the candidate build runs for over an hour before publish
+	# force-pushes the result. Anything pushed to a tracking branch during that
+	# window is not in the prepared branch, and force-pushing would destroy it.
+	#
+	# --force-with-lease does NOT catch this: publish re-fetches origin, so the
+	# lease is computed from the *current* remote tip and always matches. The
+	# lease only asserts "the remote is where I last looked"; it never asserts
+	# "what I am pushing contains what is already there". On 2026-07-19 that gap
+	# silently destroyed three commits (selinux-policy r4/r5 and the mwan3
+	# default) pushed during a 101-minute build window in run 29699824816.
+	for branch in "$MAIN_BRANCH" "$MONO_OSS_BRANCH" "$MONO_ASK_BRANCH"; do
+		remote_branch_exists "$branch" || continue
+
+		if ! git merge-base --is-ancestor "$(remote_ref "$branch")" "$branch"; then
+			printf '::error::Refusing to publish %s: the remote branch advanced while the candidate was building, and the prepared branch does not contain the following commit(s):\n' \
+				"$branch" >&2
+			git log --oneline --no-decorate \
+				"${branch}..$(remote_ref "$branch")" >&2 || true
+			printf '::error::Re-run this workflow so prepare rebuilds %s from the current remote tip.\n' \
+				"$branch" >&2
+			exit 1
+		fi
+	done
+
 	main_sha="$(git rev-parse "$MAIN_BRANCH")"
 	mono_oss_sha="$(git rev-parse "$MONO_OSS_BRANCH")"
 	mono_ask_sha="$(git rev-parse "$MONO_ASK_BRANCH")"
@@ -258,7 +283,12 @@ publish() {
 	oss_lease="$(force_with_lease_arg "$MONO_OSS_BRANCH")"
 	ask_lease="$(force_with_lease_arg "$MONO_ASK_BRANCH")"
 
-	git push --atomic \
+	# --force-if-includes is the git-native form of the guard above: it refuses
+	# the push unless the remote-tracking tip is reachable from what is being
+	# pushed. Kept alongside the explicit check because it relies on the
+	# remote-tracking reflog, which is thin in a fresh CI clone; the loop above
+	# is the reliable one and produces an actionable message.
+	git push --atomic --force-if-includes \
 		"$main_lease" \
 		"$oss_lease" \
 		"$ask_lease" \
