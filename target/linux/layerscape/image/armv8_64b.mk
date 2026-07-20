@@ -383,9 +383,14 @@ define Device/mono_gateway-dk
   KERNEL_LOADADDR := 0x80000000
   KERNEL := kernel-bin | gzip | fit gzip $$(DEVICE_DTS_DIR)/$$(DEVICE_DTS).dtb
   FILESYSTEMS := ext4
-  IMAGES := rootfs.ext4 sysupgrade.bin
+  IMAGES := rootfs.ext4 sysupgrade.bin.gz
    IMAGE/rootfs.ext4 := mono-mkfs-ext4 | mono-add-kernel | mono-add-fman
-   IMAGE/sysupgrade.bin := mono-mkfs-ext4 | mono-add-kernel | mono-add-fman | append-metadata
+   # gzip BEFORE append-metadata, matching x86's combined.img.gz recipe: fwtool
+   # reads the metadata trailer at literal EOF, so compressing afterwards buries
+   # it inside the gzip stream and sysupgrade rejects the image without -F.
+   # Naming the image *.gz also suppresses the generic ext4 GZ_SUFFIX in
+   # include/image.mk, so this does not double-compress.
+   IMAGE/sysupgrade.bin.gz := mono-mkfs-ext4 | mono-add-kernel | mono-add-fman | gzip | append-metadata
   SUPPORTED_DEVICES := mono,gateway-dk
   DEVICE_PACKAGES += \
     kmod-leds-lp5812 \
