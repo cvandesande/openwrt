@@ -193,6 +193,14 @@ prepare() {
 
 	exclude_ref="$(remote_ref "$MAIN_BRANCH")"
 
+	# Record where each tracking branch stood when prepare ran. publish compares
+	# the remote against these to detect anything pushed during the build window;
+	# see the comment on the drift check in publish() for why ancestry cannot be
+	# used here.
+	for branch in "$MAIN_BRANCH" "$MONO_OSS_BRANCH" "$MONO_ASK_BRANCH"; do
+		set_output "${branch//-/_}_base_sha" "$(git rev-parse "$(remote_ref "$branch")")"
+	done
+
 	git switch --force-create "$MAIN_BRANCH" "$upstream_main_ref"
 	restore_paths_from_ref "$exclude_ref"
 	commit_if_needed "${MAIN_BRANCH}: track upstream source without imported workflows"
@@ -251,6 +259,10 @@ publish() {
 		exit 1
 	fi
 
+	# The drift check below is only as fresh as the remote-tracking refs, so
+	# refresh them here rather than depending on the caller having fetched.
+	git fetch --prune "$ORIGIN_REMOTE" "+refs/heads/*:refs/remotes/${ORIGIN_REMOTE}/*"
+
 	# Prepare rebuilds these branches from the remote tips as they stood when
 	# prepare ran, then the candidate build runs for over an hour before publish
 	# force-pushes the result. Anything pushed to a tracking branch during that
@@ -262,14 +274,31 @@ publish() {
 	# "what I am pushing contains what is already there". On 2026-07-19 that gap
 	# silently destroyed three commits (selinux-policy r4/r5 and the mwan3
 	# default) pushed during a 101-minute build window in run 29699824816.
+	#
+	# The check is drift from the prepare-time tip, NOT ancestry. Ancestry cannot
+	# work here: prepare rebuilds main from upstream with a fresh restore commit
+	# and rebases mono-oss/mono-ask onto it, so no prepared branch is ever a
+	# descendant of its remote tip, and an ancestry guard rejects every run even
+	# when nothing was pushed (run 29798402733, 2026-07-21).
 	for branch in "$MAIN_BRANCH" "$MONO_OSS_BRANCH" "$MONO_ASK_BRANCH"; do
-		remote_branch_exists "$branch" || continue
+		base_var="$(printf '%s_BASE_SHA' "${branch//-/_}" | tr '[:lower:]' '[:upper:]')"
+		base_sha="${!base_var:-}"
 
-		if ! git merge-base --is-ancestor "$(remote_ref "$branch")" "$branch"; then
-			printf '::error::Refusing to publish %s: the remote branch advanced while the candidate was building, and the prepared branch does not contain the following commit(s):\n' \
-				"$branch" >&2
-			git log --oneline --no-decorate \
-				"${branch}..$(remote_ref "$branch")" >&2 || true
+		if [ -z "$base_sha" ]; then
+			printf '::error::%s is not set; publish requires the prepare-time tip of %s to detect concurrent pushes\n' \
+				"$base_var" "$branch" >&2
+			exit 1
+		fi
+
+		if ! remote_branch_exists "$branch"; then
+			continue
+		fi
+
+		remote_sha="$(git rev-parse "$(remote_ref "$branch")")"
+		if [ "$remote_sha" != "$base_sha" ]; then
+			printf '::error::Refusing to publish %s: the remote branch moved from %s to %s while the candidate was building. Force-pushing would destroy the following commit(s):\n' \
+				"$branch" "$base_sha" "$remote_sha" >&2
+			git log --oneline --no-decorate --max-count=50 "${base_sha}..${remote_sha}" >&2 || true
 			printf '::error::Re-run this workflow so prepare rebuilds %s from the current remote tip.\n' \
 				"$branch" >&2
 			exit 1
@@ -283,12 +312,11 @@ publish() {
 	oss_lease="$(force_with_lease_arg "$MONO_OSS_BRANCH")"
 	ask_lease="$(force_with_lease_arg "$MONO_ASK_BRANCH")"
 
-	# --force-if-includes is the git-native form of the guard above: it refuses
-	# the push unless the remote-tracking tip is reachable from what is being
-	# pushed. Kept alongside the explicit check because it relies on the
-	# remote-tracking reflog, which is thin in a fresh CI clone; the loop above
-	# is the reliable one and produces an actionable message.
-	git push --atomic --force-if-includes \
+	# No --force-if-includes: it is the git-native form of an ancestry check and
+	# would reject every run for the same reason the old guard did (see above).
+	# The drift check is the guard; --force-with-lease still catches a push that
+	# lands between the fetch above and this push.
+	git push --atomic \
 		"$main_lease" \
 		"$oss_lease" \
 		"$ask_lease" \
