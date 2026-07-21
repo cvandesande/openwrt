@@ -38,6 +38,9 @@ jobs:
       main_sha: ${{ steps.prepare.outputs.main_sha }}
       mono_oss_sha: ${{ steps.prepare.outputs.mono_oss_sha }}
       mono_ask_sha: ${{ steps.prepare.outputs.mono_ask_sha }}
+      main_base_sha: ${{ steps.prepare.outputs.main_base_sha }}
+      mono_oss_base_sha: ${{ steps.prepare.outputs.mono_oss_base_sha }}
+      mono_ask_base_sha: ${{ steps.prepare.outputs.mono_ask_base_sha }}
     steps:
       - name: Check out workflow branch
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -301,4 +304,8 @@ jobs:
       - name: Publish main/mono-oss/mono-ask
         id: publish
         working-directory: ${{ github.workspace }}/source
+        env:
+          MAIN_BASE_SHA: ${{ needs.prepare-candidates.outputs.main_base_sha }}
+          MONO_OSS_BASE_SHA: ${{ needs.prepare-candidates.outputs.mono_oss_base_sha }}
+          MONO_ASK_BASE_SHA: ${{ needs.prepare-candidates.outputs.mono_ask_base_sha }}
         run: NIGHTLY_BUILD_MODE=publish bash .github/workflows/scripts/update-nightly-tracking-branches.sh
