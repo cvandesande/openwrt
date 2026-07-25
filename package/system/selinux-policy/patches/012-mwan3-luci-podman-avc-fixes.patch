@@ -1,6 +1,6 @@
 diff -Naur a/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil b/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil
---- a/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil	2026-07-20 22:41:01.510546438 +0100
-+++ b/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil	2026-07-20 22:40:45.111543850 +0100
+--- a/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil	2025-11-27 06:12:27.000000000 +0000
++++ b/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil	2026-07-25 20:50:36.085822513 +0100
 @@ -18,12 +18,24 @@
    ;; mtdblock backup
    (call .mtd.read_stordev_blk_files (subj))
@@ -40,8 +40,8 @@ diff -Naur a/src/agent/sysagent/cgiscriptsysagent/cgiiocgiscriptsysagent.cil b/s
  (in file.unconfined
  
 diff -Naur a/src/agent/sysagent/hotplugsysagent.cil b/src/agent/sysagent/hotplugsysagent.cil
---- a/src/agent/sysagent/hotplugsysagent.cil	2026-07-20 22:41:01.510600780 +0100
-+++ b/src/agent/sysagent/hotplugsysagent.cil	2026-07-20 22:31:56.310007558 +0100
+--- a/src/agent/sysagent/hotplugsysagent.cil	2025-11-27 06:12:27.000000000 +0000
++++ b/src/agent/sysagent/hotplugsysagent.cil	2026-07-25 20:51:30.049923496 +0100
 @@ -14,6 +14,9 @@
      (call conf.read_file_files (subj))
      (call conf.read_file_lnk_files (subj))
@@ -52,7 +52,7 @@ diff -Naur a/src/agent/sysagent/hotplugsysagent.cil b/src/agent/sysagent/hotplug
      (call .block.list_sysfile_dirs (subj))
      (call .block.read_sysfile_lnk_files (subj))
  
-@@ -59,12 +62,24 @@
+@@ -59,12 +62,32 @@
      (call .libubox.data.list_file_dirs (subj))
      (call .libubox.data.read_file_files (subj))
  
@@ -71,13 +71,21 @@ diff -Naur a/src/agent/sysagent/hotplugsysagent.cil b/src/agent/sysagent/hotplug
      (call .mtd.read_stordev_chr_files (subj))
  
 +    ;; mwan3's iface hotplug reads /tmp/run/mwan3/mmx_mask
++    ;; mwan3's iface hotplug shells out to mkdir to create /tmp/run/mwan3 when
++    ;; it does not exist yet (tmpfs, so every boot): add_name on the generic
++    ;; /tmp/run parent, plus the transition so the new dir lands as
++    ;; mwan3.runtmp.file rather than generic runtmp
++    (call .runtmp.addname_file_dirs (subj))
++
 +    (call .mwan3.runtmp.list_file_dirs (subj))
++    (call .mwan3.runtmp.manage_file_dirs (subj))
 +    (call .mwan3.runtmp.read_file_files (subj))
++    (call .mwan3.runtmp.runtmp_file_type_transition_file (subj))
 +
      (call .net.search_sysctlfile_dirs (subj))
  
      (call .netif.data.list_file_dirs (subj))
-@@ -112,7 +127,10 @@
+@@ -112,7 +135,10 @@
  
      (call .ucode.data.dontaudit_readinherited_file_files (subj))
  
@@ -91,8 +99,8 @@ diff -Naur a/src/agent/sysagent/hotplugsysagent.cil b/src/agent/sysagent/hotplug
  
 diff -Naur a/src/agent/sysagent/mwan3sysagent.cil b/src/agent/sysagent/mwan3sysagent.cil
 --- a/src/agent/sysagent/mwan3sysagent.cil	1970-01-01 01:00:00.000000000 +0100
-+++ b/src/agent/sysagent/mwan3sysagent.cil	2026-07-20 22:36:26.276706749 +0100
-@@ -0,0 +1,76 @@
++++ b/src/agent/sysagent/mwan3sysagent.cil	2026-07-25 20:51:30.056428077 +0100
+@@ -0,0 +1,83 @@
 +;; SPDX-FileCopyrightText: © 2026 Mono OpenWrt <mono-openwrt@local>
 +;; SPDX-License-Identifier: Unlicense
 +
@@ -130,10 +138,17 @@ diff -Naur a/src/agent/sysagent/mwan3sysagent.cil b/src/agent/sysagent/mwan3sysa
 +  (call .uci.subj_type_transition (subj))
 +  (call .xtables.subj_type_transition (subj))
 +
-+  ;; its own runtime state (mmx_mask and friends)
++  ;; its own runtime state (mmx_mask and friends). mwan3 shells out to mkdir
++  ;; to create /tmp/run/mwan3, so it also needs add_name on the generic
++  ;; /tmp/run parent, and the type transition registered for its own domain
++  ;; (not just file.unconfined) so the new dir lands as mwan3.runtmp.file.
++  (call .runtmp.addname_file_dirs (subj))
++
 +  (call runtmp.list_file_dirs (subj))
++  (call runtmp.manage_file_dirs (subj))
 +  (call runtmp.manage_file_files (subj))
 +  (call runtmp.readwrite_file_dirs (subj))
++  (call runtmp.runtmp_file_type_transition_file (subj))
 +
 +  (call .tmp.deletename_fs_dirs (subj))
 +
@@ -170,8 +185,8 @@ diff -Naur a/src/agent/sysagent/mwan3sysagent.cil b/src/agent/sysagent/mwan3sysa
 +	   (call .exec.file_type_transition
 +		 (ARG1 file file "mwan3"))))
 diff -Naur a/src/agent/sysagent/rpcdsysagent.cil b/src/agent/sysagent/rpcdsysagent.cil
---- a/src/agent/sysagent/rpcdsysagent.cil	2026-07-20 22:41:01.510664801 +0100
-+++ b/src/agent/sysagent/rpcdsysagent.cil	2026-07-20 22:20:08.886447478 +0100
+--- a/src/agent/sysagent/rpcdsysagent.cil	2025-11-27 06:12:27.000000000 +0000
++++ b/src/agent/sysagent/rpcdsysagent.cil	2026-07-25 20:50:36.085987123 +0100
 @@ -121,6 +121,10 @@
  
      (call .mtd.read_procfile_files (subj))
@@ -210,7 +225,7 @@ diff -Naur a/src/agent/sysagent/rpcdsysagent.cil b/src/agent/sysagent/rpcdsysage
        (filecon "/tmp/run/rpcd" dir file_context)
 diff -Naur a/src/agent/sysagent/swanmonsysagent.cil b/src/agent/sysagent/swanmonsysagent.cil
 --- a/src/agent/sysagent/swanmonsysagent.cil	1970-01-01 01:00:00.000000000 +0100
-+++ b/src/agent/sysagent/swanmonsysagent.cil	2026-07-20 22:40:39.935565601 +0100
++++ b/src/agent/sysagent/swanmonsysagent.cil	2026-07-25 20:50:36.086013413 +0100
 @@ -0,0 +1,63 @@
 +;; SPDX-FileCopyrightText: © 2026 Mono OpenWrt <mono-openwrt@local>
 +;; SPDX-License-Identifier: Unlicense
@@ -276,8 +291,8 @@ diff -Naur a/src/agent/sysagent/swanmonsysagent.cil b/src/agent/sysagent/swanmon
 +	   (call .exec.file_type_transition
 +		 (ARG1 file file "swanmon"))))
 diff -Naur a/src/agent/sysagent/wireguardtoolssysagent.cil b/src/agent/sysagent/wireguardtoolssysagent.cil
---- a/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-20 22:41:01.510691852 +0100
-+++ b/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-20 22:20:08.886493094 +0100
+--- a/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-25 20:51:30.075582674 +0100
++++ b/src/agent/sysagent/wireguardtoolssysagent.cil	2026-07-25 20:50:36.086049030 +0100
 @@ -38,6 +38,8 @@
  
        (call .netif.data.dontaudit_readinherited_file_files (subj))
@@ -289,7 +304,7 @@ diff -Naur a/src/agent/sysagent/wireguardtoolssysagent.cil b/src/agent/sysagent/
        (call .ucode.readwriteinherited_subj_fifo_files (subj))
 diff -Naur a/src/agent/sysagent/xtablessysagent.cil b/src/agent/sysagent/xtablessysagent.cil
 --- a/src/agent/sysagent/xtablessysagent.cil	1970-01-01 01:00:00.000000000 +0100
-+++ b/src/agent/sysagent/xtablessysagent.cil	2026-07-20 22:20:08.886531566 +0100
++++ b/src/agent/sysagent/xtablessysagent.cil	2026-07-25 20:50:36.086068477 +0100
 @@ -0,0 +1,54 @@
 +;; SPDX-FileCopyrightText: © 2026 Mono OpenWrt <mono-openwrt@local>
 +;; SPDX-License-Identifier: Unlicense
@@ -346,8 +361,8 @@ diff -Naur a/src/agent/sysagent/xtablessysagent.cil b/src/agent/sysagent/xtables
 +	   (call .exec.file_type_transition
 +		 (ARG1 file file "ipset"))))
 diff -Naur a/src/file/datafile/localesdatafile.cil b/src/file/datafile/localesdatafile.cil
---- a/src/file/datafile/localesdatafile.cil	2026-07-20 22:41:01.510738239 +0100
-+++ b/src/file/datafile/localesdatafile.cil	2026-07-20 22:20:08.886574197 +0100
+--- a/src/file/datafile/localesdatafile.cil	2025-11-27 06:12:27.000000000 +0000
++++ b/src/file/datafile/localesdatafile.cil	2026-07-25 20:50:36.086110646 +0100
 @@ -16,10 +16,15 @@
  	     (call .data.file_type_transition
  		 (ARG1 file dir "zoneinfo")))
@@ -365,8 +380,8 @@ diff -Naur a/src/file/datafile/localesdatafile.cil b/src/file/datafile/localesda
      (call locales.data.read_file_files (typeattr))
      (call locales.data.read_file_lnk_files (typeattr)))
 diff -Naur a/src/file/tmpfile/libtmpfile.cil b/src/file/tmpfile/libtmpfile.cil
---- a/src/file/tmpfile/libtmpfile.cil	2026-07-20 22:41:01.510766012 +0100
-+++ b/src/file/tmpfile/libtmpfile.cil	2026-07-20 22:20:08.886617569 +0100
+--- a/src/file/tmpfile/libtmpfile.cil	2025-11-27 06:12:27.000000000 +0000
++++ b/src/file/tmpfile/libtmpfile.cil	2026-07-25 20:50:36.086140853 +0100
 @@ -10,6 +10,11 @@
  	 (call .tmp.fs_type_transition
  	       (ARG1 file dir "lib")))
