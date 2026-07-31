@@ -525,3 +525,51 @@ For the current validation scope and stage status, see
 [01-platform-and-lab-state.md](01-platform-and-lab-state.md). For the detailed
 proof model and stage breakdown, see
 [03-fman-backend-design.md](03-fman-backend-design.md).
+
+## Port And PHY Layout
+
+Migrated from the retired workspace handoff notes, 2026-07-31. SFP-cage
+specifics are in [05-sfp-module-diagnostics.md](05-sfp-module-diagnostics.md).
+
+All five ports share one stack: `fsl,dpa-ethernet` netdevs into `sdk_dpaa` into
+the FMan mEMAC. The active image uses the `mono-gateway-dk-sdk` DTB and the NXP
+SDK DPAA stack (`CONFIG_FSL_SDK_DPAA_ETH=y`; upstream `FSL_DPAA` disabled).
+
+- **1G ports** are SGMII with **MaxLinear GPY115C** PHYs at MDIO addresses 0, 1
+  and 2 on `mdio@fd000` — `eth0`=phy0, `eth1`=phy1, `eth2`=phy2.
+- **10G ports** are XGMII via `fixed-link`.
+
+**No PHY has an `interrupts` property**, in the vendor DTS either, and the
+MaxLinear driver sets `PHY_F_NO_IRQ` regardless. phylib therefore polls link
+state at 1 Hz. That matters: with the generic PHY driver, `genphy_read_status()`
+leaves `->link` at the latch-low BMSR value, so any brief loss of sync becomes a
+full one-second link-down with the bridge dropping the port. The `mxl-gpy`
+driver overrides `->link` from `PHY_MIISTAT`, a live non-latching register, so
+recovered glitches cause no outage.
+
+Enabling that driver is `CONFIG_PACKAGE_kmod-phy-maxlinear=y` in the seed —
+**not** `CONFIG_MAXLINEAR_GPHY=y`, which silently ships nothing because the kmod
+package owns the symbol. See `08-build-commands.md`.
+
+Load ordering is safe without special handling: `sdk_dpaa` connects the PHY from
+`dpa_start()`, at `ndo_open`/ifup rather than at probe, so a PHY driver shipped
+as a module still binds in time.
+
+`sdk_dpaa` does not implement phylink. There is no ethtool on the 10G ports, no
+SFP-bus attach, and `fixed-link` is mandatory rather than a workaround —
+`managed = "in-band-status"` silently never works.
+
+## CDX Classifier Notes
+
+- The CDX fast path picks up MTU **dynamically from the netdev**; no
+  reconfiguration is needed after an MTU change.
+- PCD distributions are shared across ports, and `cdx_pcd.xml` routes
+  `cdx_pppoe_dist` on every port including the 10G ones — PPPoE offload on 10G
+  needed no FMC or PCD change.
+- `cdx_cfg.xml` is committed at
+  `package/network/ask-dpa-app/files/cdx_cfg.xml`. It was once only a live edit
+  on the router, and a rebuild silently reverted it. **Never leave it
+  live-only.** The current config is 3x1G (portids 1/4/5) plus 2x10G (portids
+  6/7), with both OFFLINE OH ports dropped to fit the five-port cap. The
+  boot-time `ipsec_init_ohport ... failed` messages in dmesg are that decision,
+  not a fault.
