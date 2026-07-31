@@ -45,6 +45,12 @@ Optional developer tooling:
   Persisted CMM/CEETM upload-shaper operation: supported physical-port scope,
   fixed channel-1 policy, enable/rollback commands, and validation limits.
 
+- [08-build-commands.md](08-build-commands.md)
+  Local build recipes: normal firmware build, focused package builds, the
+  post-`dirclean` sequence, cross-compiling a package for the router, and
+  vendor pin-hash validation. The rules governing when to build are in
+  `AGENTS.md`.
+
 - [codeql-scoped-analysis.md](codeql-scoped-analysis.md)
   Scoped CodeQL database and SARIF workflow for ASK package integrations and
   the optional ASK kernel patch surface.
