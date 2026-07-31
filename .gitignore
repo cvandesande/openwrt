@@ -39,3 +39,4 @@ git-src
 .cproject
 .ccache
 .vscode*
+.claude/settings.local.json
