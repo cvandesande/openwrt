@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git commit *)",
+            "command": "git diff --cached --name-only 2>/dev/null | grep -qx STATE.md || printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"About to commit. If this changes what is deployed on the router, or the in-flight status of a branch, update STATE.md in this same commit - it is the first file a fresh session reads. If it changes neither, ignore this.\"}}'",
+            "statusMessage": "Checking STATE.md"
+          }
+        ]
+      }
+    ]
+  }
+}
