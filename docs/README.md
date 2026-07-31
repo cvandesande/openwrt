@@ -9,8 +9,8 @@ today:
 - the upload-side CEETM hardware egress-shaping proof on the current
   WAN path
 - the current IPv4 tunnel-mode IPsec SEC-offload baseline
-- the current SELinux bring-up status, with permissive mode as the default
-  while policy coverage is still being validated
+- SELinux running enforcing, with policy shaped by audited denials rather than
+  broad allowances
 
 Read in this order:
 
