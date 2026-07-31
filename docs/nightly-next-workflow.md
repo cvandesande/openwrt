@@ -309,3 +309,56 @@ explicit GitHub App/PAT with the required bypass rights.
 
 The workflow intentionally treats nightly builds as integration signals only.
 They are not hardware validation and are not release points.
+
+## Publish Guard: Why `--force-with-lease` Was Not Enough
+
+Migrated from the retired workspace handoff notes, 2026-07-31. This records a
+real data-loss incident and the guard added in response.
+
+**What happened.** The workflow prepares branches, builds for roughly 100
+minutes, then force-pushes the SHA it computed *before* the build. One run
+prepared `mono-ask` at 19:02Z, built until 20:43Z, and published at 20:44Z —
+destroying three commits pushed in between. The next nightly rebuilt from the
+damaged branch and republished, which made the loss look like it originated
+there. Recovery was a rebase of the dropped commits onto the rewritten tip plus
+a fast-forward push.
+
+**`--force-with-lease` did not catch it.** Publish re-fetches origin, so the
+lease matches the current remote tip and always passes. The lease asserts "the
+remote is where I last looked" — never "what I am pushing contains what is
+already there."
+
+**The guard is a drift check, and `--force-if-includes` is deliberately not
+used.** An ancestry-based form rejected *every* run, because prepare rebuilds
+`main` from upstream with a fresh restore commit and rebases `mono-oss` and
+`mono-ask` onto it — so no prepared branch is ever a descendant of its remote
+tip, and `--force-if-includes` is the git-native form of that same broken test.
+
+The live guard instead compares each branch's current remote tip against the
+`*_BASE_SHA` recorded at prepare time and refuses to publish if it moved.
+**If you push during a nightly window the nightly fails rather than clobbering
+you.** That failure is the guard working; re-run the workflow so prepare
+restarts from the current tip.
+
+The recovery procedure for any bot rewrite — fetch first, compare by content
+rather than by hash, rebase `--onto`, push fast-forward, never force-push over
+the bot — is in `AGENTS.md` under Git Discipline.
+
+## Toolchain Cache
+
+**Status: unvalidated.** The shared cache action was updated to a
+`toolchain-state-v2` exact cache, affecting both Nightly Build and the release
+line (same action, separate namespaces). The previous cache restored only
+`staging_dir/toolchain-*`, which did not preserve the toolchain build workspace
+or stamps, so cache-hit runs still rebuilt all seven stages.
+
+The new cache restores and saves `build_dir/toolchain-*`,
+`staging_dir/toolchain-*`, and `tmp/.build`; includes host build and tool
+fingerprints in the key; and normalizes only OpenWrt's exact-hit dependency
+stamps before the always-run `make -j"$(nproc)" toolchain/install V=s`
+reconciliation. There is no fallback key, so an incompatible toolchain is
+rebuilt rather than reused.
+
+The seeding run's initial miss was expected. **Before calling this resolved,
+inspect the next compatible run** for cache archive size, restore time,
+toolchain elapsed time, and rebuild count.
