@@ -132,7 +132,13 @@ More detail lives in:
 - [docs/02-fast-path-architecture.md](docs/02-fast-path-architecture.md)
 - [docs/03-fman-backend-design.md](docs/03-fman-backend-design.md)
 - [docs/04-developer-tooling.md](docs/04-developer-tooling.md)
+- [docs/05-sfp-module-diagnostics.md](docs/05-sfp-module-diagnostics.md)
+- [docs/06-selinux-audit-diagnostics.md](docs/06-selinux-audit-diagnostics.md)
+- [docs/07-cmmqos-persistent-shaper.md](docs/07-cmmqos-persistent-shaper.md)
+- [docs/08-build-commands.md](docs/08-build-commands.md)
+- [docs/09-flash-and-verification.md](docs/09-flash-and-verification.md)
 - [docs/nightly-next-workflow.md](docs/nightly-next-workflow.md)
+- [docs/mono-release-workflow.md](docs/mono-release-workflow.md)
 
 Those docs cover:
 
@@ -144,12 +150,25 @@ Those docs cover:
 - remaining work
 - local `clangd` and `compile_commands.json` developer workflow
   ([docs/04-developer-tooling.md](docs/04-developer-tooling.md))
+- on-device SFP+ module diagnostics, including copper-module PHY access for
+  real link state ([docs/05-sfp-module-diagnostics.md](docs/05-sfp-module-diagnostics.md))
+- where SELinux denials are logged and how policy gaps are closed
+  ([docs/06-selinux-audit-diagnostics.md](docs/06-selinux-audit-diagnostics.md))
+- persisted upload-shaper operation and its validation limits
+  ([docs/07-cmmqos-persistent-shaper.md](docs/07-cmmqos-persistent-shaper.md))
+- build recipes and package pin-hash validation
+  ([docs/08-build-commands.md](docs/08-build-commands.md))
+- flashing, image metadata verification, and post-flash diagnostics
+  ([docs/09-flash-and-verification.md](docs/09-flash-and-verification.md))
 - nightly tracking-branch automation, smoke testing, and manual promotion
+- the release pipeline, where hardware validation actually happens
+  ([docs/mono-release-workflow.md](docs/mono-release-workflow.md))
 
-SELinux support is included for the Mono Gateway DK image, with policy kept in
-the OpenWrt package layer and shaped by observed access rather than broad
-allowances. Images default to permissive mode during policy validation, with
-enforcing-mode testing available.
+SELinux runs enforcing on the Mono Gateway DK image, with policy kept in the
+OpenWrt package layer and shaped by audited denials rather than broad
+allowances. The first boot after a flash runs permissive by design; the next
+boot comes up enforcing. See
+[docs/06-selinux-audit-diagnostics.md](docs/06-selinux-audit-diagnostics.md).
 
 ## Support Information
 
