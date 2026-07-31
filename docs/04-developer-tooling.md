@@ -50,8 +50,6 @@ normally, and refresh the database only when the compiler context changes.
 Run this from the OpenWrt repo root:
 
 ```sh
-cd /home/cvandesande/mono-openwrt-project/openwrt
-
 make -j"$(nproc)" target/linux/compile
 
 KDIR="$(find build_dir/target-aarch64_generic_musl/linux-layerscape_armv8_64b \
@@ -123,11 +121,17 @@ single package with `-j1 V=s` for a readable failure log.
 - `compile_commands.ask-cmm.json`
 - `compile_commands.fci.json`
 
-It then rewrites ASK package source paths back to the editable sibling repos:
+It then rewrites ASK package source paths back to the editable vendor repos.
+Those are **separate repositories**, located under `--project-root`, which
+defaults to the parent directory of this checkout:
 
-- `/home/cvandesande/mono-openwrt-project/ask-cdx`
-- `/home/cvandesande/mono-openwrt-project/ask-cmm`
-- `/home/cvandesande/mono-openwrt-project/fci`
+- `<project-root>/ask-cdx`
+- `<project-root>/ask-cmm`
+- `<project-root>/fci`
+
+If you cloned only this repo, they are absent and the rewrite step has nothing
+to point at. The kernel entries still work; only vendor-source navigation is
+unavailable. Pass `--project-root` if your checkouts live elsewhere.
 
 Kernel entries remain pointed at the generated kernel build tree because that
 is where OpenWrt applies patches and generates kernel headers.
@@ -141,17 +145,20 @@ local analysis database; it does not change real OpenWrt builds.
 After the merged database exists, point `clangd` or your editor at:
 
 ```text
-/home/cvandesande/mono-openwrt-project/openwrt/compile_commands.json
+compile_commands.json
 ```
 
-For a terminal smoke test:
+in the root of this repo. It is a generated local artifact, kept out of Git, so
+it is absent until you regenerate it.
+
+For a terminal smoke test, run from this repo's root. These examples check files
+in the vendor repos, so they only apply if those are checked out — substitute
+your own `<project-root>`:
 
 ```sh
-clangd --check=/home/cvandesande/mono-openwrt-project/ask-cmm/src/conntrack.c \
-  --compile-commands-dir=/home/cvandesande/mono-openwrt-project/openwrt
+clangd --check=<project-root>/ask-cmm/src/conntrack.c --compile-commands-dir=.
 
-clangd --check=/home/cvandesande/mono-openwrt-project/ask-cdx/cdx-5.03.1/control_ipv4.c \
-  --compile-commands-dir=/home/cvandesande/mono-openwrt-project/openwrt
+clangd --check=<project-root>/ask-cdx/cdx-5.03.1/control_ipv4.c --compile-commands-dir=.
 ```
 
 The purpose is faster navigation and better diagnostics while editing. The
