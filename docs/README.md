@@ -57,8 +57,4 @@ Optional developer tooling:
   metadata verification, apk conffile preservation, and the post-flash
   diagnostic command set.
 
-- [codeql-scoped-analysis.md](codeql-scoped-analysis.md)
-  Scoped CodeQL database and SARIF workflow for ASK package integrations and
-  the optional ASK kernel patch surface.
-
 These docs intentionally describe the current supported design only.
