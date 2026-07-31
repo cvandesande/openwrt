@@ -7,6 +7,7 @@ file so every agent reads the same rules.
 - **What happened, when** — `journal/YYYY-MM-DD.md`, append-only, never edited.
 - **Open work** — GitHub issues on `cvandesande/openwrt` (`gh issue list`).
 - **Reference** — `docs/`. Note `05-*` and `06-*` exist only on `mono-ask`.
+- **Helper scripts** — `scripts/mono-*`; every one takes `--help`.
 
 ## Sibling Repositories
 
@@ -16,6 +17,8 @@ repo alone is self-contained for building — only vendor-source editing and
 navigation need them.
 
 - `ask-cdx/`, `ask-cmm/`, `fci/` — owned source repos used by OpenWrt package pins.
+  The recipes that pin them: `package/kernel/ask-cdx`, `package/network/ask-cmm`,
+  `package/kernel/ask-fci`, `package/libs/libfci`, `package/network/ask-dpa-app`.
 - `ASK/` — vendor ASK source/reference. Third-party input, not an owned repo.
 - `OpenWRT-ASK/` — vendor reference firmware tree, not the active build system.
 
