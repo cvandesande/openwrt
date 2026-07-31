@@ -51,6 +51,12 @@ Optional developer tooling:
   vendor pin-hash validation. The rules governing when to build are in
   `AGENTS.md`.
 
+- [09-flash-and-verification.md](09-flash-and-verification.md)
+  Getting an image onto the board and confirming what runs: file transfer
+  without sftp, the U-Boot boot flow and the `/boot` shadowing trap, image
+  metadata verification, apk conffile preservation, and the post-flash
+  diagnostic command set.
+
 - [codeql-scoped-analysis.md](codeql-scoped-analysis.md)
   Scoped CodeQL database and SARIF workflow for ASK package integrations and
   the optional ASK kernel patch surface.

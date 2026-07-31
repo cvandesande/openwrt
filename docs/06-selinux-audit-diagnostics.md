@@ -103,3 +103,43 @@ triaged as user-visible breakage, dominated by `hotplug-call`
 `getattr` on `/etc/mwan3.user` — a triple per mwan3 hotplug event) plus
 occasional `rpcd`/`iptables` records. If mwan3 or hotplug behavior ever
 looks subtly wrong, start there.
+
+## Operational Facts
+
+Migrated from the retired workspace handoff notes, 2026-07-31.
+
+- **The first boot after a flash runs permissive by design.** The next reboot
+  comes up enforcing, and that boot is the real validation moment. Observed as
+  `current=permissive` against `config=enforcing`, with the policy loaded early
+  but no `type=1404`/`MAC_STATUS` record.
+- **`audit.log` spans the whole boot**, so denials from an already-fixed policy
+  revision are still present in it. Always split by timestamp before concluding
+  that a fix failed.
+- **`file_contexts.subs_dist` maps `/usr/sbin` to `/usr/bin`.** Filecon entries
+  for binaries under `/usr/sbin` must therefore be written as `/usr/bin/<name>`.
+  Upstream nft and fw4 filecons follow this. Getting it wrong leaves the binary
+  as generic `exec.file`, which is silent until a confined domain tries to
+  execute it.
+- **A denial that is fixed often reveals a second one behind it**, because
+  enforcing stops at the first. Never read "the denial is gone" as "the path
+  works" — re-exercise the whole path.
+- **Live-relabelled and flashed images are not equivalent.** A router that has
+  been `restorecon`'d after `load_policy` carries different labels than a fresh
+  flash, which applies the filecons baked into the image. If behaviour differs
+  after a flash, suspect that first.
+- **Host `libsepol`/`libselinux` rebuilds fail against stale headers** in
+  `staging_dir/hostpkg/include/{sepol,selinux}`. Remove those directories first.
+- There is **no `setools`** (`sesearch`, `seinfo`) on the build host, so allow
+  rules cannot be read back out of a compiled policy. `secilc` resolves macro
+  calls at compile time, so a bad macro fails the build rather than silently
+  doing nothing — that is the indirect evidence available instead.
+- **The leading dot is load-bearing in CIL.** `.runtmp.` is the absolute generic
+  `/tmp/run`; a bare `runtmp.` inside a block resolves relative to that block.
+  Both forms appear deliberately in the same patch and are not redundant.
+- **Regenerate policy patches from the pristine tarball; do not hand-edit.**
+  Extract the source tarball, apply the preceding patches to get a base, apply
+  the target patch and overwrite the changed files, then `diff -Naur base new`.
+  Strip `patch`'s `.orig` backups from both trees first or they leak in as
+  spurious hunks. Note that `patch --dry-run` on a *series* is meaningless:
+  dry-run does not modify the tree, so each patch is tested against an
+  unmodified base and correct patches are reported as failing.
