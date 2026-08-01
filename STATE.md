@@ -20,18 +20,21 @@ syncing cleanly at boot.
 - cmm r27 with `cmmqos`; **kmod-ask-cdx r55, ask-dpa-app r5** — the six-port
   config with the IPsec OH port, verified loaded by content.
 - `kmod-phy-maxlinear` driving the three 1G PHYs; `wg0` on port 443, 5 peers.
-- selinux-policy **r8** loaded, but SELinux is running **permissive** — see
-  below. This is a change from the previous image and is not understood.
+- selinux-policy **r8** loaded; enforcing mode depends on the reboot state —
+  see below.
 
-**SELinux is permissive on the deployed box.** `sestatus` reports
-`Current mode: permissive` against `Mode from config file: enforcing`.
-`/etc/selinux/config` says `SELINUX=enforcing`, `/proc/cmdline` carries no
-`enforcing=0`, and nothing in `/etc/init.d/`, `/etc/rc.local` or
-`/etc/uci-defaults/` calls `setenforce`. Cause unknown, not guessed at. Five
-AVC denials this boot, both kinds already known: `xtables.subj` ->
-`netif.data.file` (x3) and `hotplug.call.subj` -> `mwan3.runtmp.file` (x2), the
-latter being the #32 survivor that unbuilt `selinux-policy-r9` addresses.
-**Wants its own issue.**
+**SELinux mode is permissive or enforcing depending on whether the box has
+been rebooted since the flash.** `/etc/selinux/config` always says
+`SELINUX=enforcing`; the running mode is what varies. Immediately after a
+flash it comes up permissive, and a subsequent reboot brings it to enforcing.
+So `sestatus` reporting `Current mode: permissive` against `Mode from config
+file: enforcing` is expected on a freshly flashed box and is not a fault —
+check the reboot state before treating it as one.
+
+Observed permissive after the 2026-08-01 flash, with five AVC denials, both
+kinds already known: `xtables.subj` -> `netif.data.file` (x3) and
+`hotplug.call.subj` -> `mwan3.runtmp.file` (x2), the latter being the #32
+survivor that unbuilt `selinux-policy-r9` addresses.
 
 ## Branches
 
@@ -135,8 +138,11 @@ Two operational notes. The packaged `cdx_cfg.xml` is **not** a conffile, so any
 config is what a flash delivers. And `/root/cdx-6port-failsafe.sh` plus
 `/root/.cdx-6port-confirmed` **did not survive sysupgrade** (`/root` is not on
 the keep list, unlike `/etc`), so the 25.12 six-port boot ran with no safety net
-and succeeded anyway. `/etc/rc.local` was kept and still hooks the absent
-script; the `[ -x ... ] &&` guard makes it inert, but it should be removed.
+and succeeded anyway. `/etc/rc.local` was kept and still hooked the absent
+script behind an inert `[ -x ... ] &&` guard; **removed 2026-08-01**, restored
+to stock, with the previous contents backed up to `/etc/rc.local.bak-29`.
+`/etc` is on the keep list, so both the cleanup and that backup persist across
+flashes — delete the backup when it is no longer wanted.
 
 Issue #29's stated risks are refuted: the cap was never a vendor constant, and
 FIFO/tasks/DMAs are committed at FMan probe from the DTS, so `cdx_cfg.xml`
