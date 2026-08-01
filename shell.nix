@@ -56,6 +56,12 @@ let
       export NM=gcc-nm
       export RANLIB=gcc-ranlib
       export FAKEROOTDONTTRYCHOWN=1
+      # Keep in step with flake.nix, which carries the full explanation.
+      # nixpkgs' ld-wrapper injects a dead -rpath (relative $out) into host
+      # links, so any hostpkg->hostpkg library dependency fails to load.
+      if [ -f "$PWD/rules.mk" ]; then
+        export LD_LIBRARY_PATH="$PWD/staging_dir/hostpkg/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+      fi
     '';
   };
 in pkgs.mkShell {

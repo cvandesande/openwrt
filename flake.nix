@@ -77,6 +77,24 @@
           export NM=gcc-nm
           export RANLIB=gcc-ranlib
           export FAKEROOTDONTTRYCHOWN=1
+          # nixpkgs' ld-wrapper injects -rpath $out/lib into every host link.
+          # Outside a real nix build $out resolves to a relative "outputs/out",
+          # so host binaries get a dead rpath into the tree instead of a usable
+          # one -- 52 of 77 staging_dir/hostpkg/bin binaries carry it. Harmless
+          # for anything needing only nix-store libs, fatal for any
+          # hostpkg->hostpkg library dependency.
+          #
+          # Hit on 2026-08-01 during a cold build: libselinux/host staged
+          # libselinux.so.1, gettext-full/host configured minutes later, linked
+          # against it (its HOST_BUILD_DEPENDS does not order the two), and
+          # every msg* tool then failed to load it, breaking
+          # policycoreutils/host. Only cold builds lose that race.
+          #
+          # Point the loader at the host staging tree. Guarded on rules.mk so
+          # it applies only when the shell is entered from an OpenWrt tree.
+          if [ -f "$PWD/rules.mk" ]; then
+            export LD_LIBRARY_PATH="$PWD/staging_dir/hostpkg/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
         '';
       };
     in {
