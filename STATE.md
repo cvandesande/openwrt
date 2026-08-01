@@ -7,26 +7,42 @@ question, it belongs in an issue.
 ## Production
 
 The router's WAN runs PPPoE over the 10G port (`eth4`) at a true 10G copper
-link, with hardware fast-path offload active, cmm crash-supervised under procd,
-RFC 4638 baby-jumbo MTU proven end-to-end, QoS shaping UCI-persisted via
-`cmmqos`, and SELinux enforcing with WireGuard syncing cleanly at boot.
+link, with hardware fast-path offload active, **IPsec offload active on the
+IPsec OFFLINE port**, cmm crash-supervised under procd, RFC 4638 baby-jumbo MTU
+proven end-to-end, QoS shaping UCI-persisted via `cmmqos`, and WireGuard
+syncing cleanly at boot.
 
-- Image `25.12.5-mono1` (`mono-ask-v25.12.5-r6`, kernel 6.12.94, 25.12 line),
-  built 2026-07-26 from `mono-ask-25.12` `6c21493790`.
+- Image `25.12.5` (`BUILD_ID r33051-f5dae5ece4`, kernel 6.12.94, 25.12 line),
+  built and flashed 2026-08-01 from `mono-ask-25.12` `9ec05f6134`. Booted
+  18:28 IST.
 - `wan10g` = PPPoE on `eth4.10`, MAC-cloned, mtu 1508 parent+child, ppp 1500.
 - `wan` (1G) stays `disabled=1` as a manual fallback — one active at a time.
-- cmm r27 with `cmmqos`; selinux-policy **r8** loaded, enforcing.
+- cmm r27 with `cmmqos`; **kmod-ask-cdx r55, ask-dpa-app r5** — the six-port
+  config with the IPsec OH port, verified loaded by content.
 - `kmod-phy-maxlinear` driving the three 1G PHYs; `wg0` on port 443, 5 peers.
+- selinux-policy **r8** loaded, but SELinux is running **permissive** — see
+  below. This is a change from the previous image and is not understood.
+
+**SELinux is permissive on the deployed box.** `sestatus` reports
+`Current mode: permissive` against `Mode from config file: enforcing`.
+`/etc/selinux/config` says `SELINUX=enforcing`, `/proc/cmdline` carries no
+`enforcing=0`, and nothing in `/etc/init.d/`, `/etc/rc.local` or
+`/etc/uci-defaults/` calls `setenforce`. Cause unknown, not guessed at. Five
+AVC denials this boot, both kinds already known: `xtables.subj` ->
+`netif.data.file` (x3) and `hotplug.call.subj` -> `mwan3.runtmp.file` (x2), the
+latter being the #32 survivor that unbuilt `selinux-policy-r9` addresses.
+**Wants its own issue.**
 
 ## Branches
 
 - `mono-ask` — default branch; docs, journal, and this file live here.
-- `mono-ask-25.12` — the release line that gets flashed.
+- `mono-ask-25.12` — the release line that gets flashed; at `9ec05f6134`,
+  which is what is currently on the router.
 - `selinux-policy-r9` — in flight: the #32 survivor's fix
   (`read_file_files` → `manage_file_files`, PKG_RELEASE 8→9). Pushed, but
   **not built, not flashed, not ported to `mono-ask`**.
 
-`mono-ask` also carries the #29 IPsec OH-port change: ask-cdx **r55** and
+**Both branches** carry the #29 IPsec OH-port change: ask-cdx **r55** and
 ask-dpa-app r5 re-adding portid 9. r53 raised the port ceiling 5→16 (derived
 from `FMC_PORTS_PER_FMAN`) and fixed two OH-path bugs — a `==`→`&` bitmap test
 and a missing bounds check. r54 added no functional change, only logging of
@@ -95,15 +111,32 @@ Note the earlier claim that `ip xfrm state` showed no SAs was unfounded:
 printing `Object "xfrm" is unknown` to stderr. See the silent-lie trap list in
 `AGENTS.md`.
 
-**Not ported to `mono-ask-25.12`**, which is kernel 6.12.94 and is what
-actually gets flashed; all of the above is 6.18.39 on `mono-ask`.
+**Ported to `mono-ask-25.12` as `9ec05f6134`, built, flashed, and proven there
+on 2026-08-01.** Everything above was 6.18.39 on `mono-ask`; the release line
+is 6.12.94 and is what actually gets flashed, so it was not real until it ran
+there. The four `mono-ask` commits are collapsed to their end state — the
+r52/r53/r54 diagnostic pins are not reproduced on the release line, and
+`PKG_RELEASE` numbering is kept in lockstep so a given rNN is the same content
+on both branches. On 6.12.94:
+
+```
+cdx_module_init::start_dpa_app successful
+ipsec_init_ohport:: ipsec of port id = 9
+```
+
+with SEC-engine counters advancing (+505 / +273 packets over six seconds) on
+SPIs `c634c987` / `c6c933e8` while `swanctl --list-sas` holds both at exactly
+0 bytes / 0 packets. Loaded `cdx.ko` confirmed r55 by content string, not by
+version label. `PKG_MIRROR_HASH` on 25.12 is copied from the `mono-ask`-verified
+pin, not regenerated.
 
 Two operational notes. The packaged `cdx_cfg.xml` is **not** a conffile, so any
 `ask-dpa-app` upgrade or flash overwrites the runtime copy — the six-port
-config is now what a flash delivers. And `/root/cdx-6port-failsafe.sh`, hooked
-from `/etc/rc.local`, is untracked runtime state left over from the test; it
-stands down permanently now that `/root/.cdx-6port-confirmed` exists, and
-should be removed once #29 closes.
+config is what a flash delivers. And `/root/cdx-6port-failsafe.sh` plus
+`/root/.cdx-6port-confirmed` **did not survive sysupgrade** (`/root` is not on
+the keep list, unlike `/etc`), so the 25.12 six-port boot ran with no safety net
+and succeeded anyway. `/etc/rc.local` was kept and still hooks the absent
+script; the `[ -x ... ] &&` guard makes it inert, but it should be removed.
 
 Issue #29's stated risks are refuted: the cap was never a vendor constant, and
 FIFO/tasks/DMAs are committed at FMan probe from the DTS, so `cdx_cfg.xml`
@@ -136,8 +169,11 @@ Deployed as runtime config only — no code change, no build, nothing to port:
 Offload survives the change: the acquire-created SA offloads exactly like an
 initiate-created one, hardware counters advancing while the kernel stays at
 zero. `/lib/upgrade/keep.d/strongswan` keeps `/etc/strongswan.d/`, so both
-files survive sysupgrade and will carry onto `mono-ask-25.12` when it is next
-flashed — but carrying is not verifying, and this is **not verified on 25.12**.
+files survive sysupgrade — and **this is now verified on 25.12**. After the
+2026-08-01 flash, `startaction=route`, `closeaction=hold`,
+`keyingtries=%forever` and `charon-retry-initiate.conf` all carried across, and
+`yul_tunnel` established about four minutes after boot with no manual
+`swanctl --initiate`.
 
 The DDNS lag itself is tolerated, not solved; the tunnel is down for the few
 minutes propagation takes. Fixing that is peer-side work.
