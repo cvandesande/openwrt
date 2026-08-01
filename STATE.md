@@ -26,17 +26,36 @@ RFC 4638 baby-jumbo MTU proven end-to-end, QoS shaping UCI-persisted via
   (`read_file_files` → `manage_file_files`, PKG_RELEASE 8→9). Pushed, but
   **not built, not flashed, not ported to `mono-ask`**.
 
-`mono-ask` also carries the #29 IPsec OH-port change: ask-cdx **r53** (port
-ceiling 5→16, derived from `FMC_PORTS_PER_FMAN`, so WiFi needs no further
-kernel change; plus two OH-path fixes — a `==`→`&` bitmap test and a missing
-bounds check) and ask-dpa-app r5 re-adding portid 9. **Not built, not flashed,
-not ported to `mono-ask-25.12`.** Bench only, serial console mandatory.
+`mono-ask` also carries the #29 IPsec OH-port change: ask-cdx **r54** and
+ask-dpa-app r5 re-adding portid 9. r53 raised the port ceiling 5→16 (derived
+from `FMC_PORTS_PER_FMAN`, so WiFi needs no further kernel change) and fixed
+two OH-path bugs — a `==`→`&` bitmap test and a missing bounds check. r54 adds
+no functional change: it logs which bound rejected a config, because the
+failure below was silent.
+
+**Built and flashed on 2026-08-01, and it failed.** CDX did not initialise:
+`cdx_ioc_set_dpa_params` returned `-EINVAL`, `dpa_app` exited 255, and the
+kernel printed nothing but `start_dpa_app failed rc 65280`. WAN and LAN did not
+come up. Recovered live by deleting the `type="OFFLINE"` line from
+`/usr/share/ask-dpa-app/cdx_cfg.xml` and rebooting; the router is back on the
+5-port config with r53's `cdx.ko` still installed, which is itself evidence the
+kernel changes are harmless on their own. **The unit currently running this is
+the production router, not a bench board.**
+
+Ruled out: the loaded module was confirmed to be r53 (its `port out of range`
+string is present in `cdx.ko`), so `CDX_CTRL_MAX_PORTS_PER_FMAN` is 16 and
+`max_ports = 6` passes. Both OH ports probe and are `enabled` at ~2.3s with no
+FMan resource errors. The surviving candidates are the other bounds in
+`dpa_cfg.c` — `CDX_CTRL_MAX_DIST_PER_PORT` (12, and the OFFLINE policy lists
+exactly 12 distributions) and `CDX_CTRL_MAX_TABLES_PER_FMAN` (64). r54 is what
+distinguishes them.
+
+Next step is the r54 kmod alone — no reflash — then re-add the OFFLINE line and
+read dmesg. **Not built, not ported to `mono-ask-25.12`.**
 
 Issue #29's stated risks are refuted: the cap was never a vendor constant, and
 FIFO/tasks/DMAs are committed at FMan probe from the DTS, so `cdx_cfg.xml`
-does not affect them. The live unknown is whether the `==`→`&` fix is
-sufficient — if fmc leaves an OFFLINE port's `ccnodes[]` empty it is not. See
-`journal/2026-08-01.md`.
+does not affect them. See `journal/2026-08-01.md`.
 
 ## Where things are
 
