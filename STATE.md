@@ -59,13 +59,37 @@ there isn't one. In practice bench means physically off production, with serial
 attached, and every change on this path must be recoverable that way. Budget
 for downtime rather than a second unit.
 
-r55 is **installed on the router and unproven**: the on-disk `cdx.ko` carries
-it, but the running module is still r54 and the config is still 5 ports, so
-nothing has exercised the fix. The next test is a bench trip — re-add the
-OFFLINE line, reboot, and confirm CDX initialises. Whether the stages of
-`set_dpa_params` past validation work with an OFFLINE port has never been
-tested. **Not ported to `mono-ask-25.12`**, which is kernel 6.12.94 and is what
+**The six-port config boots.** Proven on hardware 2026-08-01, remotely, no
+bench trip:
+
+```
+cdx_module_init::start_dpa_app successful
+ipsec_init_ohport:: ipsec of port id = 9
+IPSEC_CGR / IPSEC_REINJECT / IPSEC_SIGNAL / IPSEC_FROMSEC: stage=init
+```
+
+The IPsec OH port allocates for the first time on this board, all five IPsec
+subsystems initialise, and no `rejected:` or `MAX_MATCH_TABLES` line appears —
+so the OFFLINE port introduced no unknown table type. No regression: WAN
+forwarding flows are still `fp-state: installed` with `fpp-dir:
+orig+reply(0x3)` through `pppoe-wan10g`, PPPoE is up, and every `fallback`
+entry is `local-conn: yes` or router-originated.
+
+**IPsec offload itself is NOT proven.** `ip xfrm state` and `ip xfrm policy`
+are both empty — swanctl is installed with nothing configured, so `dpa_ipsec`
+has no SA to offload. What is proven is that the blocker is gone and the path
+initialises. Proving offload needs a real tunnel plus tuple-level hardware
+stats and CPU-path evidence.
+
+**Not ported to `mono-ask-25.12`**, which is kernel 6.12.94 and is what
 actually gets flashed; all of the above is 6.18.39 on `mono-ask`.
+
+Two operational notes. The packaged `cdx_cfg.xml` is **not** a conffile, so any
+`ask-dpa-app` upgrade or flash overwrites the runtime copy — the six-port
+config is now what a flash delivers. And `/root/cdx-6port-failsafe.sh`, hooked
+from `/etc/rc.local`, is untracked runtime state left over from the test; it
+stands down permanently now that `/root/.cdx-6port-confirmed` exists, and
+should be removed once #29 closes.
 
 Issue #29's stated risks are refuted: the cap was never a vendor constant, and
 FIFO/tasks/DMAs are committed at FMan probe from the DTS, so `cdx_cfg.xml`
