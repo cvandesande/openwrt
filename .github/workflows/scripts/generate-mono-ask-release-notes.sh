@@ -55,14 +55,33 @@ commit_list() {
 	done < <(git log --no-merges --pretty=tformat:'%H%x09%s' "$range")
 }
 
-# Best-effort lookup of the most recently published release on this line, so
-# the appendix can show only what's actually new instead of the full
-# cumulative patch stack every time. Every fork/advance rebases the ASK and
-# OSS branches fresh onto the new upstream base, so there is no shared git
-# ancestor to diff a range against -- matching by commit subject against the
-# previous release's own published appendix is the only thing that survives
-# that rebase. This must never fail the release build, so every failure mode
-# here just falls back to the full range.
+# Every release publishes the full cumulative commit list of both layers as a
+# machine-readable asset, so the next release can diff against it and show only
+# what is actually new. Every fork/advance rebases the ASK and OSS branches
+# fresh onto the new upstream base, so there is no shared git ancestor to diff a
+# range against -- commit subject is the only identity that survives that
+# rebase, and the manifest records it explicitly rather than making the next
+# release re-parse rendered markdown.
+COMMIT_MANIFEST_NAME="mono-ask-release-commits.tsv"
+
+# Emits "layer<TAB>sha<TAB>orig<TAB>subject" for a range. This is the
+# cumulative stack, not the delta -- a delta would be useless as the next
+# release's baseline.
+write_manifest_layer() {
+	local layer="$1"
+	local range="$2"
+	local map_file="$3"
+	local sha subject orig
+
+	while IFS=$'\t' read -r sha subject; do
+		orig="$(lookup_orig_sha "$sha" "$map_file")"
+		printf '%s\t%s\t%s\t%s\n' "$layer" "$sha" "$orig" "$subject"
+	done < <(git log --no-merges --pretty=tformat:'%H%x09%s' "$range")
+}
+
+# Best-effort lookup of the most recently published release on this line. This
+# must never fail the release build, so every failure mode here falls back to
+# reporting the full range -- clearly labelled as such, never as a delta.
 previous_release_tag() {
 	[ -n "${GITHUB_REPOSITORY:-}" ] || return 1
 	command -v gh >/dev/null 2>&1 || return 1
@@ -72,7 +91,32 @@ previous_release_tag() {
 		2>/dev/null || return 1
 }
 
-previous_release_subjects() {
+# Downloads the previous release's commit manifest. Prints its path on success.
+download_previous_manifest() {
+	local tag="$1"
+	local dir
+
+	dir="$(mktemp -d)"
+	if gh release download "$tag" \
+		--repo "$GITHUB_REPOSITORY" \
+		--pattern "$COMMIT_MANIFEST_NAME" \
+		--dir "$dir" >/dev/null 2>&1 &&
+		[ -s "${dir}/${COMMIT_MANIFEST_NAME}" ]
+	then
+		printf '%s\n' "${dir}/${COMMIT_MANIFEST_NAME}"
+		return 0
+	fi
+
+	rm -rf "$dir"
+	return 1
+}
+
+# Legacy fallback for releases cut before the manifest asset existed: recover
+# the baseline by parsing that release's own rendered appendix. Note this only
+# yields a correct baseline when the older release listed its full stack; a
+# release whose appendix was itself a delta, or whose body was replaced by hand,
+# cannot serve as a baseline at all -- hence the empty-result failure below.
+previous_release_subjects_from_body() {
 	local tag="$1"
 	local heading="$2"
 	local body
@@ -90,53 +134,100 @@ previous_release_subjects() {
 	'
 }
 
-# Renders one <details> block for a commit range, newest first. If a previous
-# release is available, scopes the list to only commits not already present
-# (by subject) in that release's own appendix section, so the notes read as
-# "what changed since last time" instead of the entire patch stack. Falls
-# back to the full range -- e.g. for the very first release on a line, or if
-# the previous-release lookup failed -- rather than showing nothing.
+# Writes the baseline subjects for one layer to $2 and sets BASELINE_SOURCE to
+# manifest|body. Returns non-zero when no usable baseline exists -- including
+# when a lookup "succeeds" but yields zero commits, which is how a hand-edited
+# release body silently produced a full stack labelled as a delta.
+BASELINE_SOURCE=""
+baseline_subjects() {
+	local layer="$1"
+	local dest="$2"
+	local prev_manifest="$3"
+	local heading="$4"
+
+	BASELINE_SOURCE=""
+
+	if [ -n "$prev_manifest" ]; then
+		awk -F'\t' -v l="$layer" '$1 == l { print $4 }' "$prev_manifest" > "$dest"
+		if [ -s "$dest" ]; then
+			BASELINE_SOURCE="manifest"
+			return 0
+		fi
+	fi
+
+	if previous_release_subjects_from_body "$PREV_TAG" "$heading" > "$dest" && [ -s "$dest" ]; then
+		BASELINE_SOURCE="body"
+		return 0
+	fi
+
+	: > "$dest"
+	return 1
+}
+
+# Renders one <details> block for a commit range, newest first. When a usable
+# baseline for the previous release exists, scopes the list to only commits not
+# already in it (matched by subject, the only identity that survives the
+# per-release rebase), so the notes read as "what changed since last time"
+# instead of the entire patch stack.
+#
+# When no baseline exists -- the first release on a line, a lookup failure, or a
+# previous release whose body was replaced by hand -- this falls back to the
+# full range and SAYS SO in the summary line. The previous version fell back
+# silently while still printing "since <tag>", which reported the whole
+# cumulative stack as if it were one release's worth of change.
 commit_details() {
 	local title="$1"
 	local range="$2"
 	local map_file="$3"
-	local prev_tag="$4"
-	local heading="$5"
-	local prev_subjects_file="" sha subject count=0 body
+	local prev_manifest="$4"
+	local layer="$5"
+	local heading="$6"
+	local baseline_file sha subject new_count=0 total body
 
-	if [ -n "$prev_tag" ]; then
-		prev_subjects_file="$(mktemp)"
-		if ! previous_release_subjects "$prev_tag" "$heading" > "$prev_subjects_file"; then
-			rm -f "$prev_subjects_file"
-			prev_subjects_file=""
+	total="$(commit_count "$range")"
+	baseline_file="$(mktemp)"
+
+	if [ -z "$PREV_TAG" ] || ! baseline_subjects "$layer" "$baseline_file" "$prev_manifest" "$heading"; then
+		rm -f "$baseline_file"
+		printf '<details>\n'
+		if [ -n "$PREV_TAG" ]; then
+			printf '<summary>%s: full stack (%s commits, no usable baseline for `%s`)</summary>\n\n' \
+				"$title" "$total" "$PREV_TAG"
+		else
+			printf '<summary>%s: full stack (%s commits, no previous release found)</summary>\n\n' \
+				"$title" "$total"
 		fi
+		commit_list "$range" "$map_file"
+		printf '\n</details>\n'
+		return
 	fi
+
+	body="$(mktemp)"
+	while IFS=$'\t' read -r sha subject; do
+		if grep -Fxq "$subject" "$baseline_file"; then
+			continue
+		fi
+		format_commit_line "$sha" "$subject" "$map_file" >> "$body"
+		new_count=$((new_count + 1))
+	done < <(git log --no-merges --pretty=tformat:'%H%x09%s' "$range")
 
 	printf '<details>\n'
-
-	if [ -n "$prev_subjects_file" ]; then
-		body="$(mktemp)"
-		while IFS=$'\t' read -r sha subject; do
-			if [ -s "$prev_subjects_file" ] && grep -Fxq "$subject" "$prev_subjects_file"; then
-				continue
-			fi
-			format_commit_line "$sha" "$subject" "$map_file" >> "$body"
-			count=$((count + 1))
-		done < <(git log --no-merges --pretty=tformat:'%H%x09%s' "$range")
-
-		printf '<summary>%s since `%s` (%s commits)</summary>\n\n' "$title" "$prev_tag" "$count"
-		if [ "$count" -eq 0 ]; then
-			printf -- '- None\n'
-		else
-			cat "$body"
-		fi
-		rm -f "$body" "$prev_subjects_file"
+	if [ "$BASELINE_SOURCE" = body ]; then
+		printf '<summary>%s since `%s` (%s new of %s total, baseline recovered from release notes)</summary>\n\n' \
+			"$title" "$PREV_TAG" "$new_count" "$total"
 	else
-		printf '<summary>%s (%s commits)</summary>\n\n' "$title" "$(commit_count "$range")"
-		commit_list "$range" "$map_file"
+		printf '<summary>%s since `%s` (%s new of %s total)</summary>\n\n' \
+			"$title" "$PREV_TAG" "$new_count" "$total"
 	fi
 
+	if [ "$new_count" -eq 0 ]; then
+		printf -- '- None\n'
+	else
+		cat "$body"
+	fi
 	printf '\n</details>\n'
+
+	rm -f "$body" "$baseline_file"
 }
 
 for name in \
@@ -158,6 +249,24 @@ done
 curated_notes="docs/releases/${RELEASE_TAG}.md"
 mkdir -p "$(dirname "$out")"
 
+# Published as a release asset next to the images, and read back by the next
+# release on this line as its baseline.
+manifest="$(dirname "$out")/${COMMIT_MANIFEST_NAME}"
+{
+	write_manifest_layer ask "${OSS_SHA}..${ASK_SHA}" "${ASK_SHA_MAP:-}"
+	write_manifest_layer oss "${BASE_SHA}..${OSS_SHA}" "${OSS_SHA_MAP:-}"
+} > "$manifest"
+
+PREV_TAG="$(previous_release_tag || true)"
+prev_manifest=""
+if [ -n "$PREV_TAG" ]; then
+	prev_manifest="$(download_previous_manifest "$PREV_TAG" || true)"
+	if [ -z "$prev_manifest" ]; then
+		printf '::warning::No %s asset on %s; falling back to release-notes parsing for the baseline\n' \
+			"$COMMIT_MANIFEST_NAME" "$PREV_TAG" >&2
+	fi
+fi
+
 {
 	printf '# Mono OpenWrt %s %s\n\n' "$VERSION_NUMBER" "$RELEASE_TAG"
 	printf 'This is a Mono OpenWrt pre-release for controlled smoke testing. Built from OpenWrt upstream tag `%s`.\n\n' "$UPSTREAM_TAG"
@@ -168,13 +277,11 @@ mkdir -p "$(dirname "$out")"
 		printf '\n\n'
 	fi
 
-	prev_tag="$(previous_release_tag || true)"
-
 	printf '## Commit Appendix\n\n'
-	printf 'Commits are listed newest first. When a previous release is found on this line, each list is scoped to commits new since that release; otherwise the full range is shown. `orig` cites the pre-rebase commit SHA on the source branch, where known.\n\n'
-	commit_details "Included Mono ASK commits" "${OSS_SHA}..${ASK_SHA}" "${ASK_SHA_MAP:-}" "${prev_tag:-}" "Included Mono ASK commits"
+	printf 'Commits are listed newest first, scoped to what is new since the previous release on this line. A summary line reading "full stack" means no baseline was available and the entire cumulative patch stack is shown instead. `orig` cites the pre-rebase commit SHA on the source branch, where known. The complete cumulative list ships as the `%s` release asset.\n\n' "$COMMIT_MANIFEST_NAME"
+	commit_details "Included Mono ASK commits" "${OSS_SHA}..${ASK_SHA}" "${ASK_SHA_MAP:-}" "$prev_manifest" ask "Included Mono ASK commits"
 	printf '\n'
-	commit_details "Included Mono OSS commits" "${BASE_SHA}..${OSS_SHA}" "${OSS_SHA_MAP:-}" "${prev_tag:-}" "Included Mono OSS commits"
+	commit_details "Included Mono OSS commits" "${BASE_SHA}..${OSS_SHA}" "${OSS_SHA_MAP:-}" "$prev_manifest" oss "Included Mono OSS commits"
 	printf '\n\n'
 
 	printf '## Source\n\n'
