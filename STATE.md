@@ -109,6 +109,39 @@ Issue #29's stated risks are refuted: the cap was never a vendor constant, and
 FIFO/tasks/DMAs are committed at FMan probe from the DTS, so `cdx_cfg.xml`
 does not affect them. See `journal/2026-08-01.md`.
 
+**#33 is fixed** — `yul_tunnel` now establishes after a cold boot with no
+manual `swanctl --initiate`, verified hands-off on hardware 2026-08-01 on the
+same 6.18.39 `mono-ask` build. The fix is `option startaction 'route'`
+(`start_action = trap`), which re-initiates on every matching packet instead of
+once at load.
+
+There were two boot failures, not one. The reported DNS race is real, and
+`charon.retry_initiate_interval` closes it. But **the WAN IP changes on every
+reboot** (three boots, three addresses) and DDNS lags by minutes, so the peer
+answers `NO_PROPOSAL_CHOSEN` until its resolution of `ork.opendmz.com` catches
+up — which `retry_initiate_interval` does not cover, and `keyingtries` does not
+either, because an explicit error notify destroys the IKE_SA and
+`start_action = start` never fires again. Only the trap policy retries
+indefinitely. It took three acquires over six minutes to come up.
+
+Deployed as runtime config only — no code change, no build, nothing to port:
+
+| Change | Where |
+|---|---|
+| `startaction 'route'` — **the fix** | `uci ipsec.yul_tunnel.startaction` |
+| `closeaction 'hold'` — coherence with trap | `uci ipsec.yul_tunnel.closeaction` |
+| `keyingtries '%forever'` — did not help, kept | `uci ipsec.yul.keyingtries` |
+| `retry_initiate_interval = 5s` | `/etc/strongswan.d/charon-retry-initiate.conf` |
+
+Offload survives the change: the acquire-created SA offloads exactly like an
+initiate-created one, hardware counters advancing while the kernel stays at
+zero. `/lib/upgrade/keep.d/strongswan` keeps `/etc/strongswan.d/`, so both
+files survive sysupgrade and will carry onto `mono-ask-25.12` when it is next
+flashed — but carrying is not verifying, and this is **not verified on 25.12**.
+
+The DDNS lag itself is tolerated, not solved; the tunnel is down for the few
+minutes propagation takes. Fixing that is peer-side work.
+
 ## Where things are
 
 | What | Where |
