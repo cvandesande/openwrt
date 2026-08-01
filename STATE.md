@@ -26,6 +26,11 @@ RFC 4638 baby-jumbo MTU proven end-to-end, QoS shaping UCI-persisted via
   (`read_file_files` → `manage_file_files`, PKG_RELEASE 8→9). Pushed, but
   **not built, not flashed, not ported to `mono-ask`**.
 
+`mono-ask` also carries the #29 IPsec OH-port change (ask-cdx r52 port cap
+5→6, ask-dpa-app r5 re-adds portid 9). **Not built, not flashed, not ported to
+`mono-ask-25.12`.** Bench only, serial console mandatory — both untested
+failure modes are a dead dataplane at boot.
+
 ## Where things are
 
 | What | Where |
