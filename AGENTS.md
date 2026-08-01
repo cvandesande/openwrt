@@ -85,6 +85,12 @@ Hardware validation happens through the release pipeline. See
     **Always pass `--input-logs`**, or grep `/var/log/audit/audit.log` directly.
   - `ubus network.device status` echoes configured MTU even when the kernel
     refused it. Verify with `ip -d link show`.
+  - `/sbin/ip` is `ip-tiny`, which has no `xfrm` object. `ip xfrm state` prints
+    `Object "xfrm" is unknown` to **stderr and exits 0**, so a piped
+    `grep -c` reports zero SAs whether or not any exist. Use
+    `swanctl --list-sas` for the strongswan view and
+    `cmm -c "show stat ipsec query"` for hardware SA counters. `ip help` lists
+    the objects this build actually supports.
   - Pinned build timestamps and an inherited `BUILD_ID` never indicate
     freshness. Verify by content — `apk list -I`, `PKG_RELEASE`, `lsmod`, sha256.
 

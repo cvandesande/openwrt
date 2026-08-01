@@ -75,11 +75,25 @@ forwarding flows are still `fp-state: installed` with `fpp-dir:
 orig+reply(0x3)` through `pppoe-wan10g`, PPPoE is up, and every `fallback`
 entry is `local-conn: yes` or router-originated.
 
-**IPsec offload itself is NOT proven.** `ip xfrm state` and `ip xfrm policy`
-are both empty — swanctl is installed with nothing configured, so `dpa_ipsec`
-has no SA to offload. What is proven is that the blocker is gone and the path
-initialises. Proving offload needs a real tunnel plus tuple-level hardware
-stats and CPU-path evidence.
+**IPsec offload is proven in hardware**, same day, on the `yul_tunnel`
+site-to-site tunnel (ESP tunnel mode, AES-GCM-16-256) carrying a live video
+stream from a camera on the remote subnet:
+
+| | inbound `c94964bb` | outbound `c0945d09` |
+|---|---|---|
+| SEC engine (`cmm -c "show stat ipsec query"`) | 8116 pkts / 7,136,218 B | 3983 pkts / 290,640 B |
+| Kernel (`swanctl --list-sas`) | 0 / 0 | 0 / 0 |
+
+Counters advance in real time while the kernel stays at exactly zero, CPU sits
+at `100% idle` with `0% sirq` during the stream, and ICV/HW error counters are
+zero. The flow shows `fp-state: installed`, `local-conn: no`,
+`fpp-dir: orig+reply(0x3)`. Traffic must be encapsulated — the remote is
+RFC1918 and reachable — and the kernel is demonstrably not doing it.
+
+Note the earlier claim that `ip xfrm state` showed no SAs was unfounded:
+`/sbin/ip` is `ip-tiny`, which has no `xfrm` object and **exits 0** after
+printing `Object "xfrm" is unknown` to stderr. See the silent-lie trap list in
+`AGENTS.md`.
 
 **Not ported to `mono-ask-25.12`**, which is kernel 6.12.94 and is what
 actually gets flashed; all of the above is 6.18.39 on `mono-ask`.
