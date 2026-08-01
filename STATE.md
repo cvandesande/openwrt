@@ -36,11 +36,16 @@ failure below was silent.
 **Built and flashed on 2026-08-01, and it failed.** CDX did not initialise:
 `cdx_ioc_set_dpa_params` returned `-EINVAL`, `dpa_app` exited 255, and the
 kernel printed nothing but `start_dpa_app failed rc 65280`. WAN and LAN did not
-come up. Recovered live by deleting the `type="OFFLINE"` line from
-`/usr/share/ask-dpa-app/cdx_cfg.xml` and rebooting; the router is back on the
-5-port config with r53's `cdx.ko` still installed, which is itself evidence the
-kernel changes are harmless on their own. **The unit currently running this is
-the production router, not a bench board.**
+come up. Recovered by taking the router off production to the bench, deleting
+the `type="OFFLINE"` line from `/usr/share/ask-dpa-app/cdx_cfg.xml`, rebooting,
+and returning it to service. It is back on the 5-port config with r53's
+`cdx.ko` still installed, which is itself evidence the kernel changes are
+harmless on their own.
+
+**There is only one router.** #29's "bench only" cannot mean a spare board —
+there isn't one. In practice bench means physically off production, with serial
+attached, and every change on this path must be recoverable that way. Budget
+for downtime rather than a second unit.
 
 Ruled out: the loaded module was confirmed to be r53 (its `port out of range`
 string is present in `cdx.ko`), so `CDX_CTRL_MAX_PORTS_PER_FMAN` is 16 and
