@@ -9,11 +9,16 @@
     <!-- 10G/SFP+ ports -->
     <port type="10G" number="0" policy="cdx_ethport_6_policy" portid="6"/>
     <port type="10G" number="1" policy="cdx_ethport_7_policy" portid="7"/>
-    <!-- IPsec OFFLINE (OH) port. Every <port> here, OFFLINE included, counts
-         against CDX_CTRL_MAX_PORTS_PER_FMAN; that was 5, which is why this
-         entry was dropped, and ask-cdx now raises it to 6. This maps to DTS
-         dpa-fman0-oh@2 (fman0_oh_0x3), which devoh.c's ohport_assign[] binds
-         to PORT_TYPE_IPSEC. The WiFi OH port (portid 10) stays out. -->
+    <!-- IPsec OFFLINE (OH) port. Maps to DTS dpa-fman0-oh@2 (fman0_oh_0x3),
+         which devoh.c's ohport_assign[] binds to PORT_TYPE_IPSEC. The WiFi OH
+         port (portid 10) stays out.
+
+         Two ceilings in cdx_ioctl.h count this entry, and both had to move
+         before it would boot. CDX_CTRL_MAX_PORTS_PER_FMAN was 5 (ask-cdx r53
+         derived it to 16). The real blocker was CDX_CTRL_MAX_TABLES_PER_FMAN,
+         at 64: the fmc model expands the PCD per port, so five ports produced
+         60 classifier tables and six produced 72, and set_dpa_params rejected
+         the whole config. ask-cdx r55 derives that ceiling to 1024. -->
     <port type="OFFLINE" number="1" policy="cdx_port_of2_policy" portid="9"/>
   </engine>
 </config>
