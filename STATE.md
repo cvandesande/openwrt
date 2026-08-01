@@ -26,10 +26,17 @@ RFC 4638 baby-jumbo MTU proven end-to-end, QoS shaping UCI-persisted via
   (`read_file_files` → `manage_file_files`, PKG_RELEASE 8→9). Pushed, but
   **not built, not flashed, not ported to `mono-ask`**.
 
-`mono-ask` also carries the #29 IPsec OH-port change (ask-cdx r52 port cap
-5→6, ask-dpa-app r5 re-adds portid 9). **Not built, not flashed, not ported to
-`mono-ask-25.12`.** Bench only, serial console mandatory — both untested
-failure modes are a dead dataplane at boot.
+`mono-ask` also carries the #29 IPsec OH-port change: ask-cdx **r53** (port
+ceiling 5→16, derived from `FMC_PORTS_PER_FMAN`, so WiFi needs no further
+kernel change; plus two OH-path fixes — a `==`→`&` bitmap test and a missing
+bounds check) and ask-dpa-app r5 re-adding portid 9. **Not built, not flashed,
+not ported to `mono-ask-25.12`.** Bench only, serial console mandatory.
+
+Issue #29's stated risks are refuted: the cap was never a vendor constant, and
+FIFO/tasks/DMAs are committed at FMan probe from the DTS, so `cdx_cfg.xml`
+does not affect them. The live unknown is whether the `==`→`&` fix is
+sufficient — if fmc leaves an OFFLINE port's `ccnodes[]` empty it is not. See
+`journal/2026-08-01.md`.
 
 ## Where things are
 
